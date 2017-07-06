@@ -40,7 +40,7 @@ iodined_CFLAGS = $(AM_CFLAGS)
 
 COMMONSRC0 = src/base32.c src/base64.c src/common.c src/dns.c	\
  src/encoding.c src/login.c src/md5.c src/read.c src/window.c	\
- src/util.c
+ src/util.c src/hmac_md5.c
 
 COMMONSRC = $(COMMONSRC0) src/base128.c src/tun.c src/base64u.c	\
  src/base64u.h src/android_dns.h src/base128.h src/base32.h	\
@@ -88,7 +88,7 @@ noinst_PROGRAMS = test-iodine
 
 test_iodine_SOURCES = tests/test.c tests/base32.c tests/base64.c	\
  tests/common.c tests/read.c tests/dns.c tests/encoding.c		\
- tests/login.c tests/user.c tests/fw_query.c tests/window.c $(COMMONSRC0)	\
+ tests/login.c tests/user.c tests/fw_query.c tests/window.c tests/hmac.c $(COMMONSRC0)	\
  src/user.c src/fw_query.c
 
 EXTRA_DIST += tests/test.h

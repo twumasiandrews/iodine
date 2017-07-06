@@ -25,3 +25,9 @@
 /test-suite.log
 Makefile
 Makefile.in
+/.autotools
+/.cproject
+/.project
+/.settings
+/iodine.log
+/iodined.log

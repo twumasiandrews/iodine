@@ -1,6 +1,5 @@
 /*
- * Copyright (c) 2006-2014 Erik Ekman <yarrick@kryo.se>,
- * 2006-2009 Bjorn Andersson <flex@kryo.se>
+ * Copyright (c) 2017 Frekk van Blagh <frekk@frekkworks.com>
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -15,27 +14,15 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#ifndef __TEST_H__
-#define __TEST_H__
+#ifndef SRC_HMAC_MD5_H_
+#define SRC_HMAC_MD5_H_
 
-TCase *test_base32_create_tests();
-TCase *test_base64_create_tests();
-TCase *test_common_create_tests();
-TCase *test_dns_create_tests();
-TCase *test_encoding_create_tests();
-TCase *test_read_create_tests();
-TCase *test_login_create_tests();
-TCase *test_user_create_tests();
-TCase *test_fw_query_create_tests();
-TCase *test_window_create_tests();
-TCase *test_hmac_create_tests();
+#define MD5_BLOCKSIZE	64
+#define MD5_HASHSIZE	16
 
-char *va_str(const char *, ...);
+#define IPAD			0x36
+#define OPAD			0x5C
 
-#if (CHECK_MAJOR_VERSION == 0 && \
-	((CHECK_MINOR_VERSION == 9 && CHECK_MICRO_VERSION < 2) || \
-	 (CHECK_MINOR_VERSION < 9)))
-#define tcase_set_timeout(...)
-#endif
+void hmac_md5(uint8_t *dest, uint8_t *key, size_t keylen, uint8_t *data, size_t datalen);
 
-#endif
+#endif /* SRC_HMAC_MD5_H_ */
