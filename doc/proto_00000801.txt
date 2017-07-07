@@ -55,9 +55,10 @@ Server replies:
 Downstream codec check:
 Client sends:
 	First byte y or Y
-	1 char, meaning downstream codec to use
-	5 bits coded as Base32 char, meaning check variant
-	CMC as 3 Base32 chars
+	rest in base32:
+	1 byte codec ID (see 
+	4 bytes random CMC
+	
 	Possibly extra data, depending on check variant
 Server sends:
 	Data encoded with requested downstream codec; data content depending
@@ -115,8 +116,6 @@ Server replies:
 		2 bytes MTU (network byte order)
 		1 byte netmask bits (like CIDR)
 	16 bytes hash of password + client login challenge
-	4 bytes CMC
-	12 bytes HMAC
 	
 	flag can be one of:
 		N: either auth or options not accepted (LNAK)
@@ -150,69 +149,52 @@ Client sends:
 	4 bytes CMC
 	12 bytes HMAC
 Server replies:
-	BADIP if bad authentication, or:
+	BADAUTH if bad authentication, or:
 	1 char 'I'
 	1 byte length of IP address
 	Then comes external IP address of iodined server
 	as 4 bytes (IPv4) or 16 bytes (IPv6)
-	4 bytes CMC
-	12 bytes HMAC
-
 
 Switch upstream codec:
 Client sends:
 	First byte s or S
 	1 byte userid char (hex)
 	rest encoded in base32:
-	1 byte meaning number of bits per encoded byte in new codec:
-		5: Base32   (a-z0-5)
-		6: Base64   (a-zA-Z0-9+-)
-		26: Base64u (a-zA-Z0-9_-)
-		7: Base128  (a-zA-Z0-9\274-\375)
 	4 bytes CMC
 	12 bytes HMAC
+	1 byte codec type (see codec types in section "Query and response format")
 Server sends:
 	BADCODEC if not accepted. Client must then revert to previous codec
 	BADLEN if length of query is too short
-	BADIP if bad auth
-	1 byte length of codec name if accepted
-	Human readable name of codec. (After this all upstream data packets
+	BADAUTH if bad auth
+	1 byte codec type if accepted (After this all upstream data packets
 		must be encoded with the new codec.)
-	4 bytes CMC
-	12 bytes HMAC
 
 Set Options:
 Client sends:
 	First byte o or O
 	1 byte userid char (hex)
 	rest encoded in base32:
-	1 byte option flags:
-	0        1
-    +76543210+
-    |0TSUVRCL|
-    +--------+
     4 bytes CMC
     12 bytes HMAC
+	1 byte option flags:
+    +76543210+
+    |0TK00CCC|
+    +--------+
 Server sends:
 	BADCODEC if not accepted. Previous situation remains.
 	BADLEN if number of options doesn't match length of query.
-	BADIP if bad auth, or:
-	1 byte length of encoding type string
-	n bytes full name of encoding type used if successful (case insensitive).
-	4 bytes CMC
-	12 bytes HMAC
+	BADAUTH if bad auth
+	1 byte accepted codec type
+	
 Option flags:
-	T: Downstream encoding Base32, for TXT/CNAME/A/MX (default)
-	S: Downstream encoding Base64, for TXT/CNAME/A/MX
-	U: Downstream encoding Base64u, for TXT/CNAME/A/MX
-	V: Downstream encoding Base128, for TXT/CNAME/A/MX
-	R: Downstream encoding Raw, for PRIVATE/TXT/NULL (assumed for
-		PRIVATE and NULL)
-	C: Downstream compression enabled (compressed before encoding)
+	CCC: Codec field (see codec types in section "Query and response format")
+	K: Downstream compression enabled (compressed before encoding)
 	L: Lazy mode enabled, server will keep a number of requests waiting until
 		data becomes available to send downstream or the requests time out.
 		The timeout value for requests is controlled by the client.
 		Applies only to data transfer; handshake is always answered immediately.
+		See section "Lazy mode operation".
 	If codec unsupported for request type, server will use Base32; note
 	that server will answer any mix of request types that a client sends.
 	Server may disregard the encoding options; client must always use the
@@ -224,16 +206,15 @@ Client sends:
 	First byte r or R
 	1 byte userid char (hex)
 	Rest encoded as base32:
-	2 bytes fragsize (network byte order)
 	4 bytes CMC
 	12 bytes HMAC
+	2 bytes fragsize (network byte order)
 	Then follows a long random query which contents does not matter.
 Server sends:
 	BADFRAG if requested length not accepted.
-	BADIP if bad auth
+	BADAUTH if bad auth
 	2 bytes requested fragsize (network byte order)
 	1 byte random "seed"
-	12 bytes HMAC
 	Following is (fragsize-16) bytes of data, starting with the random seed,
 	and each following byte is incremented with 107.
 	This is checked by the client to determine corruption.
@@ -243,46 +224,48 @@ Client sends:
 	First byte n or N
 	1 byte userid char (hex)
 	Rest encoded with base32:
+    4 bytes CMC
+    12 bytes HMAC
 	2 bytes new downstream fragment size (network byte order)
-	4 bytes CMC
-	12 bytes HMAC
 Server sends:
 	BADFRAG if not accepted.
 	2 bytes new downstream fragment size. After this all downstream
 	payloads will be max (fragsize + 2) bytes long.
-	4 bytes CMC
-	12 bytes HMAC
 
 --------------------------
 1.5 Data packets and pings
 --------------------------
 
-Upstream data header:
-     76543 21076 54321076 54321076 5432
-    +!----+!----+!----!--+--!----!+----+
-    |0UUUU|UDCMC| Seq ID | Dn ACK |ACFL|
-    +-----+-----+--------+--------+----+
+Upstream data:
+	1 char ASCII hex coded user ID
+	rest encoded with chosen upstream codec (default base32):
+    4 bytes CMC
+    4 bytes HMAC
+	1 byte flags:
+     76543210
+    +--------+
+    |00000CFL|
+    +--------+
+    1 byte packet sequence ID
 
-Downstream data header:        |=> only if ping (P) flag set       |
-    0        1        2        3        4        5        6 
-    +--------+--------+76543210+--------+--------+--------+--------+
-    | Seq ID | Up ACK |0EIPACFL|Dn Wsize|Up Wsize|DnWstart|UpWstart|
-    +--------+--------+--------+--------+--------+--------+--------+
+Downstream data header:
+	1 byte sequence ID
+	1 byte flags
+	                  |=> only if ping (P) flag set       |
+    0        1        3        4        5        6        7
+    +--------+76543210+--------+--------+--------+--------+
+    | Seq ID |0EIPACFL|Dn Wsize|Up Wsize|DnWstart|UpWstart| (+ data...)
+    +--------+--------+--------+--------+--------+--------+
 
-UUUU = Userid
-L = Last fragment flag
-A = ACK flag
-F = First fragment flag
-C = Compression enabled for downstream packet
-P = ping flag: extra header present
-I = responded to immediately (for RTT calculation) - downstream only
-UDCMC = Upstream Data CMC char (base36 [a-z0-9])
-
-Up/Dn Wsize/Wstart = upstream/downstream window size/window start Seq ID 
-
-Upstream data packet starts with 1 byte ASCII hex coded user byte; then
-1 char data-CMC; then 4 bytes Base32 encoded header; then comes the payload
-data, encoded with the chosen upstream codec.
+Flags and fields:
+	UUUU = Userid
+	L = Last fragment flag
+	A = ACK flag
+	F = First fragment flag
+	C = Compression enabled
+	P = ping flag: extra header present - downstream only
+	I = responded to immediately (for RTT calculation) - downstream only
+	Up/Dn Wsize/Wstart = upstream/downstream window size/window start Seq ID 
 
 Downstream data starts with 3 byte header, followed by data, which may be
 compressed. If Ping flag is set, another 4 bytes are appended to the header,
@@ -290,42 +273,17 @@ containing upstream and downstream window sizes and window start sequence IDs.
 The response does not need to contain data. If the server has no data to send,
 the response will always include the ping header and the ping flag will be set.
 
-If the TCP forward error (E) flag is set, the TCP connection at the server is
-closed and the client sends EOF to stdout and exits.
-
-In NULL and PRIVATE responses, downstream data is always raw. In all other
-response types, downstream data is encoded (see Options above).
-Encoding type is indicated by 1 prefix char (before the data header):
-TXT:
-	End result is always DNS-chopped (series of len-prefixed strings
-	<=255 bytes)
-	t or T: Base32	 encoded before chop, decoded after un-chop
-	s or S: Base64	 encoded before chop, decoded after un-chop
-	u or U: Base64u	 encoded before chop, decoded after un-chop
-	v or V: Base128	 encoded before chop, decoded after un-chop
-	r or R: Raw	 no encoding, only DNS-chop
-SRV/MX/CNAME/A:
-	h or H: Hostname encoded with Base32
-	i or I: Hostname encoded with Base64
-	j or J: Hostname encoded with Base64u
-	k or K: Hostname encoded with Base128
-SRV and MX may reply with multiple hostnames, each encoded separately. Each
-has a 10-multiple priority, and encoding/decoding is done in strictly
-increasing priority sequence 10, 20, 30, etc. without gaps. Note that some DNS
-relays will shuffle the answer records in the response.
-
-
 Ping:
 Client sends:
 	First byte p or P
-	Second byte CMC
 	1 byte userid char (hex)
+    4 bytes CMC
+    12 bytes HMAC
 	Rest encoded with Base32:
-    0.......3 1..7        8 - 9
-    +--------+---+76543210+---+
-    |HMAC-MD5|...|000WTANR|CMC|
-    +--------+---+--------+---+
-    4 bytes (32-bit) HMAC
+    0.......7 12
+    +--------+76543210+
+    |WWWWSSDD|000WT00R|
+    +--------+--------+
 	1 byte window size (upstream)
 	1 byte window size (downstream)
 	1 byte window start sequence ID (upstream)
@@ -335,22 +293,68 @@ Client sends:
 	1 byte flags:
 		W = update window frag timeout
 		T = update server timeout
-		A = is ACKing downstream frag
-		N = is NACKing downstream frag (unused)
 		R = response must contain ping header (data optional)
 	4 bytes CMC
 	12 bytes HMAC
-
-If R (respond) bit is set, the server responds immediately with a ping+data packet.
-The server must also adjust its window sizes to those provided by the client.
-If the T but is set, the server sets the user's DNS timeout to the value spec-
-ified by the packet.
+Server replies with a (possibly empty) data packet with the ping (P) flag set.
+	If R (respond) bit is set, the server responds immediately with a data+ping packet.
+	The server must also adjust its window sizes to those provided by the client.
+	If the T flag is set, the server sets the user's DNS timeout to the value
+	specified by the packet.
 
 If the bit corresponding to changing a particular value (ie. window timeout) is
 not set, the value should be random. (note: this is disabled in debug mode).
 
 In lazy mode, unless the R flag is set, the server will hold the ping until it
 times out or more data becomes available to send.
+
+-----------------------------
+1.7 Query and response format
+-----------------------------
+
+The DNS answer header is independent from the command, unlike in upstream
+packets. It varies based on the DNS response type, but the contents are always
+in the same format once decoded.
+
+In NULL and PRIVATE responses, downstream data (anything returned from the
+server, not just data packets) is always raw. In all other response types,
+downstream data is encoded (see Options above).
+
+Downstream response header is as follows:
+	1 char base32-encoded flags:
+	 +98765+   H    = 0: HMAC is 96-bit, 1: 32-bit
+	 |HECCC|   CCC  = Codec type (0-7)
+	 +-----+   E    = 0: no error, 1: Codec field = error code
+	Rest encoded with specified codec:
+	4 bytes CMC (network byte order) (random for pre-login responses)
+	4 or 12 bytes HMAC (note: HMAC field is 32-bits random for all pre-login responses)
+	(data follows)
+
+Encoding is determined by value of codec field and response type.
+TXT response type:
+	End result is always DNS-chopped (series of len-prefixed
+	strings <=255 bytes). Data is encoded before chop, decoded after un-chop.
+	Raw encoding is possible, however data is still DNS chopped.
+SRV/MX/CNAME/A response:
+	Data is DNS-hostname encoded as normal which requires "undotify-ing" before
+	decoding, and is "dotified" after encoding.
+SRV and MX may reply with multiple hostnames, each encoded separately. Each
+has a 10-multiple priority, and encoding/decoding is done in strictly
+increasing priority sequence 10, 20, 30, etc. without gaps. Note that some DNS
+relays will shuffle the answer records in the response.
+
+Codec field values:
+	0x0: base32   (a-z0-5)
+	0x1: base64   (a-zA-Z0-9+-)
+	0x2: base64u  (a-zA-Z0-9_-)
+	0x3: base128  (a-zA-Z0-9\274-\375)
+	0x4: raw      (\000-\377)
+Error codes:
+	0x0: BADLEN (packet below minimum length, maybe truncated)
+	0x1: BADHMAC (HMAC does not match, packet was rejected)
+	0x2: BADUSER (user session has timed out)
+	0x3: BADCODEC (codec not accepted by server)
+	0x4: BADFRAG (frag len not accepted by server)
 
 Protocol security
 =================
@@ -370,7 +374,22 @@ according to RFC 2104. The key is calculated according to the following process:
 	3. Calculate the MD5 hash of the client challenge
 	4. Append the highest 8 bytes of the result from (2) and the lowest 8 bytes
 		of the result from (3) to the result from (1)
-	5. Calculate the MD5 hash of the result from (4), this is the key for the HMAC
+	5. Calculate the MD5 hash of the result from (4), this is the key for the HMAC.
+The HMAC is applied to the raw data (before encoding or after decoding), and to
+to ensure that the entire packet (including user char and command) is signed it
+is necessary to include the command and userid somehow. Process is as follows:
+	1. The packet is prepared (assembled in case of sending, decoded to the point
+		where the HMAC field is available in case of receiving).
+	2. The HMAC field is set to 0 (since it is included in the data to be signed,
+		but at the same time cannot sign itself).
+	3. The userid byte is XORed with the first byte of the decoded data.
+	4. The command byte (if present) is XORed with the 2nd byte of decoded data.
+	5. The HMAC is calculated using the decoded data and decoded data length.
+	6. Receiving: the calculated HMAC is compared to the value in the original packet.
+		Sending: the calculated HMAC is inserted into the HMAC field, and the raw
+		data is encoded as necessary.
+It should be noted that the codec used has no impact on the HMAC: even if the
+data were to be re-encoded differently somehow it is still the same data.  
 
 Since iodine authentication is based on MD5, which can no longer be considered
 to be cryptographically secure, it is not possible to claim that the protocol
@@ -378,7 +397,7 @@ is resistant to tampering. Furthermore, it is likely that 32-bit HMACs are not
 sufficient using any algorithm to guarantee the authenticity of the data.
 While the addition of HMAC in protocol 00000801 may provide some level of security,
 it does not provide any guarantee that your iodine session can not be hijacked
-and must not give peace of mind to the iodine user.
+and is not intended to give peace of mind to the iodine user.
 
 Replay protection existed in previous versions of the protocol in the form of
 the CMC (Cache Miss Counter) however this functions primarily to prevent DNS
