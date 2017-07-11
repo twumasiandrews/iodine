@@ -149,8 +149,7 @@ Client sends:
 	4 bytes CMC
 	12 bytes HMAC
 Server replies:
-	BADAUTH if bad authentication, or:
-	1 char 'I'
+	BADAUTH if bad authentication
 	1 byte length of IP address
 	Then comes external IP address of iodined server
 	as 4 bytes (IPv4) or 16 bytes (IPv6)
@@ -388,8 +387,9 @@ is necessary to include the command and userid somehow. Process is as follows:
 	6. Receiving: the calculated HMAC is compared to the value in the original packet.
 		Sending: the calculated HMAC is inserted into the HMAC field, and the raw
 		data is encoded as necessary.
-It should be noted that the codec used has no impact on the HMAC: even if the
-data were to be re-encoded differently somehow it is still the same data.  
+It should be noted that the codec used is not signed by the HMAC. This would mean
+that if the data was intercepted and reencoded differently in such a way that
+iodine was still able to decode it, the HMAC would still be valid.
 
 Since iodine authentication is based on MD5, which can no longer be considered
 to be cryptographically secure, it is not possible to claim that the protocol
@@ -452,25 +452,29 @@ This protocol is faster since the data is not encoded and transferred
 on top of the DNS protocol. Full packets are compressed and sent when they
 arrive on the tun device, and are processed immediately on the other side.
 
-All Raw UDP protcol messages start with a 3 byte header: 0x10d19e
+All Raw UDP protcol messages start with a fixed-length 20-byte header.
 This is not the start of a valid DNS message so it is easy to identify.
-The fourth byte contains the command (C) and the user id (U).
 
-	 7654 3210
-	+----+----+
-	|CCCC|UUUU|
-	+----+----+
+Raw UDP Header:
+	3 bytes magic:  0x10d19e
+	1 byte command (4-bits C) and user id (4-bits U):
+		 7654 3210
+		+----+----+
+		|CCCC|UUUU|
+		+----+----+	
+	4 bytes CMC/relay protection counter
+	12 bytes HMAC
 
 Login message (command = 1):
-The header is followed by a MD5 hash with the same password as in the DNS
-login. The client starts the raw mode by sending this message, and uses
-the login challenge +1, and the server responds using the login challenge -1.
-After the login message has been exchanged, both the server and the client
-switch to raw udp mode for the rest of the connection.
+	This message can only be sent after the full DNS-based login sequence has been
+	completed successfully. The client enters raw mode by sending this message,
+	which must be signed using the client's 96-bit HMAC. 
+	After the login message has been exchanged, both the server and the client
+	switch to raw udp mode for the rest of the connection.
 
 Data message (command = 2):
-After the header comes the payload data, which is always compressed.
+	After the header comes the payload data, which is always compressed.
 
 Ping message (command = 3):
-Sent from client to server and back to keep session open. Has no payload.
+	Sent from client to server and back to keep session open. Has no payload.
 
