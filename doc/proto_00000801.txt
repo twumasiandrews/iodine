@@ -12,8 +12,9 @@ Changes from 00000800 to 00000801:
  - Increase size of login challenge
  - Add client to server login challenge
  - Remove ACKs entirely
- - Replace TCP forwarding with UDP forwarding
+ - Replace TCP forwarding with UDP forwarding and move to options command
  - Upstream data header now uses same encoding as data
+ - Add HMAC to raw UDP protocol as well, simplifying raw login
 
 ======================================================
 1. DNS protocol
@@ -79,11 +80,11 @@ Server sends:
 -----------------
 
 Version:
-Client sends:
+Client sends (length 1+8):
 	First byte v or V
 	Rest encoded with base32:
 	4 bytes big endian protocol version
-	4 bytes CMC
+	4 bytes random CMC
 Server replies:
 	1 char:
 		A (version ok), followed by login challenge
@@ -91,9 +92,13 @@ Server replies:
 		F (server has no free slots), followed by max users
 	4 byte value: means new userid/server protocol version/max users
 	16 byte server login challenge
+Note: The CMC value is used as a "seed", so following the version command
+all queries must be sent with CMC of ((previous CMC + 1) % MAX_UINT32).
+The server response also contains random "downstream" CMC which has the same
+requirements, although only applies to downstream traffic.
 
 Login:
-Client sends:
+Client sends (length 2+37):
 	First byte l or L
 	1 byte userid char (hex)
 	Rest encoded with base32:
@@ -105,37 +110,30 @@ Client sends:
 		4-8: unused
 	16 bytes hash of password + server login challenge
 	16 bytes client login challenge
-	2 bytes remote UDP port (big endian) - appears only when flags bit 0 is set
-	4-16 bytes remote IP address (4 bytes if IPv4 or 16 for IPv6) - included
-		 only if flags bits 0, 1 are set)
 	4 bytes CMC
 Server replies:
-	1 char flag, followed by:
-		4 bytes server IPv4 address (network byte order)
-		4 bytes client IPv4 address (network byte order)
-		2 bytes MTU (network byte order)
-		1 byte netmask bits (like CIDR)
+	BADAUTH if bad login
+	4 bytes server IPv4 address (network byte order)
+	4 bytes client IPv4 address (network byte order)
+	2 bytes MTU (network byte order)
+	1 byte netmask bits (like CIDR)
 	16 bytes hash of password + client login challenge
-	
-	flag can be one of:
-		N: either auth or options not accepted (LNAK)
-		I: Login success (followed by IP addresses)
 If the requested UDP forwarding options are not accepted by the server, the
 response is simply LNAK.
 Since UDP is connectionless, the server just sends packets to the given IP/port
 when data is received from the client, and will forward any packets received from
 that same IP/port back to the client.
 
-The login process is described as follows:
+The login process is outlined as follows:
 	1. Successful version check; server provides a 16-byte login challenge to
 		the client.
-	2. The client performs bitwise XOR with the MD5 hash of the password and
-		the server login challenge. The client generates a random 16-byte
-		client login challenge which is sent with the MD5 hash of the password
-		to the server in a login packet.
-	3. The server performs bitwise XOR with the MD5 hash of the password and
-		the client login challenge and replies to the login query. From this
-		point onwards, all packets are signed with HMAC.
+	2. The client performs MD5 hash of (server login challenge XOR MD5 hash of
+		password). The client generates a random 16-byte client login challenge
+		which is sent with the MD5 hash to the server in a login packet.
+	3. The server performs MD5 hash of (server login challenge XOR MD5 hash of
+		password) and replies to the login query. From this point onwards,
+		all packets are signed with HMAC as described in section "Protocol
+		security".
 
 ------------------------------------------------
 1.4 Authenticated packets (after login complete)
@@ -178,22 +176,26 @@ Client sends:
     12 bytes HMAC
 	1 byte option flags:
     +76543210+
-    |0TK00CCC|
+    |0LKUICCC|
     +--------+
+	2 bytes remote UDP port (big endian) - appears only when U-flag is set
+	4-16 bytes remote IP address (4 bytes if IPv4 or 16 for IPv6) - included
+	 only if flags U and I are set)
 Server sends:
 	BADCODEC if not accepted. Previous situation remains.
-	BADLEN if number of options doesn't match length of query.
 	BADAUTH if bad auth
 	1 byte accepted codec type
 	
 Option flags:
-	CCC: Codec field (see codec types in section "Query and response format")
-	K: Downstream compression enabled (compressed before encoding)
 	L: Lazy mode enabled, server will keep a number of requests waiting until
 		data becomes available to send downstream or the requests time out.
 		The timeout value for requests is controlled by the client.
 		Applies only to data transfer; handshake is always answered immediately.
 		See section "Lazy mode operation".
+	K: Downstream compression enabled (compressed before encoding)
+	U: UDP forward enabled
+	I: 0=IPv4, 1=IPv6
+	CCC: Codec field (see codec types in section "Query and response format")
 	If codec unsupported for request type, server will use Base32; note
 	that server will answer any mix of request types that a client sends.
 	Server may disregard the encoding options; client must always use the
@@ -368,12 +370,13 @@ to check if packets have been truncated by intermediate DNS servers.
 
 The HMAC component of the authentication is calculated using the HMAC-MD5 algorithm
 according to RFC 2104. The key is calculated according to the following process:
-	1. Calculate the MD5 hash of the plaintext password
-	2. Calculate the MD5 hash of the server challenge
-	3. Calculate the MD5 hash of the client challenge
-	4. Append the highest 8 bytes of the result from (2) and the lowest 8 bytes
-		of the result from (3) to the result from (1)
-	5. Calculate the MD5 hash of the result from (4), this is the key for the HMAC.
+	1. Calculate MD5(plaintext password)
+	2. Calculate MD5(server challenge)
+	3. Calculate MD5(client challenge)
+	4. Append result from (2) to result from (1)
+	5. Append result from (3) to result from (4) and pad with 0x2C to 64 bytes
+	6. Bitwise XOR result from (5) with 0xB5
+	7. Calculate the MD5 hash of the result from (6), this is the key for the HMAC.
 The HMAC is applied to the raw data (before encoding or after decoding), and to
 to ensure that the entire packet (including user char and command) is signed it
 is necessary to include the command and userid somehow. Process is as follows:
