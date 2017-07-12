@@ -378,12 +378,14 @@ main(int argc, char **argv)
 #endif
 	int choice = -1;
 	int retval = 0;
+	md5_state_t md;
 
 	char *username = NULL;
 	char *newroot = NULL;
 	char *context = NULL;
 	char *device = NULL;
 	char *pidfile = NULL;
+	char *password = NULL;
 
 	int remote_forward_port = 0;
 
@@ -522,12 +524,10 @@ main(int argc, char **argv)
 			this.use_remote_forward = 1;
 			remote_forward_port = parse_tcp_forward_option(optarg);
 			break;
-		case OPT_NODROP:
-			// TODO implement TCP-over-tun optimisations
-			break;
 		case 'P':
-			strncpy(this.password, optarg, sizeof(this.password));
-			this.password[sizeof(this.password)-1] = 0;
+			password = strdup(optarg);
+			if (!password)
+				err(1, "cannot allocate space for password!");
 
 			/* XXX: find better way of cleaning up ps(1) */
 			memset(optarg, 0, strlen(optarg));
@@ -728,12 +728,25 @@ main(int argc, char **argv)
 #endif
 	}
 
-	if (strlen(this.password) == 0) {
-		if (NULL != getenv(PASSWORD_ENV_VAR))
-			snprintf(this.password, sizeof(this.password), "%s", getenv(PASSWORD_ENV_VAR));
-		else
-			read_password(this.password, sizeof(this.password));
+	if (password == NULL) {
+		if (NULL != getenv(PASSWORD_ENV_VAR)) {
+			password = strdup(getenv(PASSWORD_ENV_VAR));
+			if (password == NULL)
+				err(1, "cannot allocate space for password!");
+		} else {
+			password = calloc(80, 1);
+			if (password == NULL)
+				err(1, "cannot allocate space for password!");
+			read_password(password, 80);
+		}
 	}
+	/* hash password */
+	md5_init(&md);
+	md5_append(&md, password, strlen(password));
+	md5_finish(this.passwordmd5);
+
+	memset(password, 0, strlen(password));
+	free(password);
 
 	if (!this.use_remote_forward) {
 		if ((this.tun_fd = open_tun(device)) == -1) {

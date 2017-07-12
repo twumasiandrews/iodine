@@ -39,12 +39,12 @@ iodine_CFLAGS = $(AM_CFLAGS)
 iodined_CFLAGS = $(AM_CFLAGS)
 
 COMMONSRC0 = src/base32.c src/base64.c src/common.c src/dns.c	\
- src/encoding.c src/login.c src/md5.c src/read.c src/window.c	\
+ src/encoding.c src/auth.c src/md5.c src/read.c src/window.c	\
  src/util.c src/hmac_md5.c
 
 COMMONSRC = $(COMMONSRC0) src/base128.c src/tun.c src/base64u.c	\
  src/base64u.h src/android_dns.h src/base128.h src/base32.h	\
- src/base64.h src/common.h src/dns.h src/encoding.h src/login.h	\
+ src/base64.h src/common.h src/dns.h src/encoding.h src/auth.h.h	\
  src/md5.h src/read.h src/tun.h src/version.h src/windows.h	\
  src/util.h src/window.h
 
@@ -56,7 +56,7 @@ iodined_SOURCES = $(COMMONSRC) src/iodined.c src/server.c \
 
 EXTRA_DIST += src/android_dns.h src/base128.h src/base32.h		\
  src/base64.h src/client.h src/common.h src/dns.h src/encoding.h	\
- src/fw_query.h src/login.h src/md5.h src/read.h src/tun.h src/user.h	\
+ src/fw_query.h src/auth.h src/md5.h src/read.h src/tun.h src/user.h	\
  src/util.h src/version.h src/windows.h
 
 src/base64u.c: src/base64.c

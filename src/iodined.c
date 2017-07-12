@@ -64,7 +64,7 @@
 #include "base64u.h"
 #include "base128.h"
 #include "user.h"
-#include "login.h"
+#include <src/auth.h>
 #include "tun.h"
 #include "fw_query.h"
 #include "version.h"
@@ -259,7 +259,9 @@ main(int argc, char **argv)
 #ifndef WINDOWS32
 	struct passwd *pw = NULL;
 #endif
+	md5_state_t md;
 	int foreground;
+	char *password;
 	char *username;
 	char *newroot;
 	char *context;
@@ -406,8 +408,9 @@ main(int argc, char **argv)
 			server.max_idle_time = atoi(optarg);
 			break;
 		case 'P':
-			strncpy(server.password, optarg, sizeof(server.password));
-			server.password[sizeof(server.password)-1] = 0;
+			password = strdup(optarg);
+			if (!password)
+				err(1, "cannot allocate space for password!");
 
 			/* XXX: find better way of cleaning up ps(1) */
 			memset(optarg, 0, strlen(optarg));
@@ -534,12 +537,25 @@ main(int argc, char **argv)
 		usage();
 	}
 
-	if (strlen(server.password) == 0) {
-		if (NULL != getenv(PASSWORD_ENV_VAR))
-			snprintf(server.password, sizeof(server.password), "%s", getenv(PASSWORD_ENV_VAR));
-		else
-			read_password(server.password, sizeof(server.password));
+	if (password == NULL) {
+		if (NULL != getenv(PASSWORD_ENV_VAR)) {
+			password = strdup(getenv(PASSWORD_ENV_VAR));
+			if (password == NULL)
+				err(1, "cannot allocate space for password!");
+		} else {
+			password = calloc(80, 1);
+			if (password == NULL)
+				err(1, "cannot allocate space for password!");
+			read_password(password, 80);
+		}
 	}
+	/* hash password */
+	md5_init(&md);
+	md5_append(&md, password, strlen(password));
+	md5_finish(this.passwordmd5);
+
+	memset(password, 0, strlen(password));
+	free(password);
 
 	created_users = init_users(server.my_ip, server.netmask);
 

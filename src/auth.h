@@ -1,6 +1,7 @@
 /*
  * Copyright (c) 2006-2014 Erik Ekman <yarrick@kryo.se>,
- * 2006-2009 Bjorn Andersson <flex@kryo.se>
+ * 2006-2009 Bjorn Andersson <flex@kryo.se>,
+ * 2017 Frekk van Blagh <frekk@frekkworks.com>
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -15,49 +16,12 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#ifdef HAVE_CONFIG_H
-#include "config.h"
+#ifndef __LOGIN_H__
+#define __LOGIN_H__
+
+void login_calculate(uint8_t *, uint8_t *, uint8_t *);
+void hmac_key_calculate(uint8_t *out,
+		uint8_t *sc, size_t scl,
+		uint8_t *cc, size_t ccl, uint8_t *passmd5);
 #endif
-
-#include <string.h>
-#include <sys/types.h>
-
-#ifdef WINDOWS32
-#include "windows.h"
-#else
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#endif
-
-#include "md5.h"
-
-/*
- * Needs a 16byte array for output, and 32 bytes password
- */
-void
-login_calculate(char *buf, int buflen, const char *pass, int seed)
-{
-	unsigned char temp[32];
-	md5_state_t ctx;
-	int *ix;
-	int i;
-	int k;
-
-	if (buflen < 16)
-		return;
-
-	memcpy(temp, pass, 32);
-	ix = (int*) temp;
-
-	for (i = 0; i < 8; i++) {
-		k = ntohl(*ix);
-		k ^= seed;
-		*ix++ = htonl(k);
-	}
-
-	md5_init(&ctx);
-	md5_append(&ctx, temp, 32);
-	md5_finish(&ctx, (unsigned char *) buf);
-
-}
 

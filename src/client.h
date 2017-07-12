@@ -37,7 +37,7 @@ struct client_instance {
 	int hostname_maxlen;
 	int raw_mode;
 	int foreground;
-	char password[33];
+	char passwordmd5[16];
 
 	/* DNS nameserver info */
 	char **nameserv_hosts;

@@ -45,7 +45,7 @@
 #include "base64u.h"
 #include "base128.h"
 #include "user.h"
-#include "login.h"
+#include <src/auth.h>
 #include "tun.h"
 #include "fw_query.h"
 #include "util.h"
@@ -941,7 +941,7 @@ handle_raw_login(uint8_t *packet, size_t len, struct query *q, int fd, int useri
 	DEBUG(1, "RX-raw: login, len %" L "u, from user %d", len, userid);
 
 	/* User sends hash of seed + 1 */
-	login_calculate(myhash, 16, server.password, users[userid].seed + 1);
+	login_calculate(myhash, 16, server.passwordmd5, users[userid].seed + 1);
 	if (memcmp(packet, myhash, 16) == 0) {
 		/* Update time info for user */
 		users[userid].last_pkt = time(NULL);
@@ -952,7 +952,7 @@ handle_raw_login(uint8_t *packet, size_t len, struct query *q, int fd, int useri
 
 		/* Correct hash, reply with hash of seed - 1 */
 		user_set_conn_type(userid, CONN_RAW_UDP);
-		login_calculate(myhash, 16, server.password, users[userid].seed - 1);
+		login_calculate(myhash, 16, server.passwordmd5, users[userid].seed - 1);
 		send_raw(fd, (uint8_t *)myhash, 16, userid, RAW_HDR_CMD_LOGIN, &q->from, q->fromlen);
 
 		users[userid].authenticated_raw = 1;
@@ -1244,14 +1244,16 @@ void
 handle_dns_version(int dns_fd, struct query *q, uint8_t *domain, int domain_len)
 {
 	uint8_t unpacked[512];
-	uint32_t version = !PROTOCOL_VERSION;
+	uint32_t version = !PROTOCOL_VERSION, cmc;
 	int userid, read;
 
 	read = unpack_data(unpacked, sizeof(unpacked), (uint8_t *)domain + 1, domain_len - 1, b32);
 	/* Version greeting, compare and send ack/nak */
-	if (read >= 4) {
-		/* Received V + 32bits version (network byte order) */
+	if (read == 8) {
+		/* Received V + 32bits version + 32bits CMC */
 		version = ntohl(*(uint32_t *) unpacked);
+		// TODO handle CMC
+		cmc = ntohl(*(uint32_t *) (unpacked + 4));
 	} /* if invalid pkt, just send VNAK */
 
 	if (version != PROTOCOL_VERSION) {
@@ -1272,7 +1274,6 @@ handle_dns_version(int dns_fd, struct query *q, uint8_t *domain, int domain_len)
 
 	/* Reset user options to safe defaults */
 	struct tun_user *u = &users[userid];
-	u->seed = rand();
 	/* Store remote IP number */
 	memcpy(&(u->host), &(q->from), q->fromlen);
 	u->hostlen = q->fromlen;
@@ -1393,8 +1394,8 @@ handle_dns_login(int dns_fd, struct query *q, uint8_t *domain, int domain_len, i
 				userid, fromaddr);
 
 	DEBUG(6, "Login: length=%d, flags=0x%02x, seed=0x%08x, hash=0x%016llx%016llx",
-			  length, flags, u->seed, *(unsigned long long *) (unpacked + 1),
-			  *(unsigned long long *) (unpacked + 9));
+			  length, flags, u->seed, *(uint64_t*)(unpacked+1),
+			  *(uint64_t*)(unpacked+9));
 
 	if (check_user_and_ip(userid, q, server.check_ip) != 0) {
 		write_dns(dns_fd, q, "BADIP", 5, 'T');
@@ -1412,7 +1413,7 @@ handle_dns_login(int dns_fd, struct query *q, uint8_t *domain, int domain_len, i
 	}
 
 	u->last_pkt = time(NULL);
-	login_calculate(logindata, 16, server.password, u->seed);
+	login_calculate(logindata, server.passwordmd5, u->seed);
 
 	if (memcmp(logindata, unpacked + 1, 16) != 0) {
 		login_ok = 0;

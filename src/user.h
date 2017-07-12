@@ -25,31 +25,32 @@
 #define USERS 16
 
 struct tun_user {
-	char id;
-	int active;
-	int authenticated;
-	int authenticated_raw;
-	time_t last_pkt;
+	uint8_t client_chall[16];
+	uint8_t server_chall[16];
 	struct timeval dns_timeout;
-	int seed;
-	in_addr_t tun_ip;
 	struct sockaddr_storage host;
-	socklen_t hostlen;
 	struct sockaddr_storage remoteforward_addr;
-	socklen_t remoteforward_addr_len; /* 0 if no remote forwarding enabled */
-	int remote_tcp_fd;
-	int remote_forward_connected; /* 0 if not connected, -1 if error or 1 if OK */
 	struct frag_buffer *incoming;
 	struct frag_buffer *outgoing;
-	int next_upstream_ack;
 	struct encoder *encoder;
-	char downenc;
-	int downenc_bits;
-	int down_compression;
-	int fragsize;
+	struct qmem_buffer qmem; // TODO dynamic allocation
+	size_t fragsize;
+	socklen_t hostlen;
+	socklen_t remoteforward_addr_len; /* 0 if no remote forwarding enabled */
+	time_t last_pkt;
+	in_addr_t tun_ip;
+	int remote_tcp_fd;
+	int remote_forward_connected; /* 0 if not connected, -1 if error or 1 if OK */
+	int next_upstream_ack;
 	enum connection conn;
-	int lazy;
-	struct qmem_buffer qmem;
+	char lazy;
+	char id;
+	char downenc;
+	char downenc_bits;
+	char down_compression;
+	char active;
+	char authenticated;
+	char authenticated_raw;
 };
 
 extern struct tun_user *users;

@@ -58,7 +58,7 @@
 #include "base64u.h"
 #include "base128.h"
 #include "dns.h"
-#include "login.h"
+#include <src/auth.h>
 #include "tun.h"
 #include "version.h"
 #include "window.h"
@@ -1579,7 +1579,7 @@ static void
 send_raw_udp_login(int seed)
 {
 	char buf[16];
-	login_calculate(buf, sizeof(buf), this.password, seed + 1);
+	login_calculate(buf, sizeof(buf), this.passwordmd5, seed + 1);
 
 	send_raw((uint8_t *) buf, sizeof(buf), RAW_HDR_CMD_LOGIN);
 }
@@ -1668,7 +1668,7 @@ handshake_login(int seed)
 	char in[4096], login[16], server[65], client[65], flag;
 	int mtu, netmask, read, numwaiting = 0;
 
-	login_calculate(login, 16, this.password, seed);
+	login_calculate(login, 16, this.passwordmd5, seed);
 
 	for (int i = 0; this.running && i < 5; i++) {
 
@@ -1834,7 +1834,7 @@ handshake_raw_udp(int seed)
 			len = recv(this.dns_fd, in, sizeof(in), 0);
 			if (len >= (16 + RAW_HDR_LEN)) {
 				char hash[16];
-				login_calculate(hash, 16, this.password, seed - 1);
+				login_calculate(hash, 16, this.passwordmd5, seed - 1);
 				if (memcmp(in, raw_header, RAW_HDR_IDENT_LEN) == 0
 					&& RAW_HDR_GET_CMD(in) == RAW_HDR_CMD_LOGIN
 					&& memcmp(&in[RAW_HDR_LEN], hash, sizeof(hash)) == 0) {
@@ -2226,7 +2226,7 @@ handshake_qtype_autodetect()
 
 	if (this.do_qtype == T_UNSET) {
 		/* also catches highestworking still 100 */
-		warnx("No suitable DNS query type found. Are you this.connected to a network?");
+		warnx("No suitable DNS query type found. Are you connected to a network?");
 		warnx("If you expect very long roundtrip delays, use -T explicitly.");
 		warnx("(Also, connecting to an \"ancient\" version of iodined won't work.)");
 		return 1;  /* problem */
