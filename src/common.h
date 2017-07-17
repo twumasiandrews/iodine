@@ -36,6 +36,9 @@
 #define RAW_HDR_USR_MASK  0x0F
 #define RAW_HDR_GET_CMD(x) ((x)[RAW_HDR_CMD] & RAW_HDR_CMD_MASK)
 #define RAW_HDR_GET_USR(x) ((x)[RAW_HDR_CMD] & RAW_HDR_USR_MASK)
+
+#define MAX_CMC (0xFFFFFFFF)
+#define CMC(cmc) ((cmc + 1) == MAX_CMC ? 0 : (cmc++))
 extern const unsigned char raw_header[RAW_HDR_LEN];
 
 #ifdef WINDOWS32
@@ -195,5 +198,7 @@ void warnx(const char *fmt, ...);
 #ifndef WINDOWS32
 void fd_set_close_on_exec(int fd);
 #endif
+
+void get_rand_bytes(uint8_t *buf, size_t len);
 
 #endif
