@@ -20,7 +20,7 @@
 
 /* This is the version of the network protocol
    It is usually equal to the latest iodine version number */
-#define PROTOCOL_VERSION 0x00000800
+#define PROTOCOL_VERSION 0x00000801
 
 #endif /* _VERSION_H_ */
 
