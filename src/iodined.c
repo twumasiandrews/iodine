@@ -69,6 +69,7 @@
 #include "fw_query.h"
 #include "version.h"
 #include "server.h"
+#include "md5.h"
 
 #ifdef HAVE_SYSTEMD
 # include <systemd/sd-daemon.h>
@@ -551,8 +552,8 @@ main(int argc, char **argv)
 	}
 	/* hash password */
 	md5_init(&md);
-	md5_append(&md, password, strlen(password));
-	md5_finish(this.passwordmd5);
+	md5_append(&md, password, (size_t)strlen(password));
+	md5_finish(&md, server.passwordmd5);
 
 	memset(password, 0, strlen(password));
 	free(password);

@@ -49,6 +49,7 @@
 #include "util.h"
 #include "encoding.h"
 #include "base32.h"
+#include "md5.h"
 
 #ifdef WINDOWS32
 #include "windows.h"
@@ -743,7 +744,7 @@ main(int argc, char **argv)
 	/* hash password */
 	md5_init(&md);
 	md5_append(&md, password, strlen(password));
-	md5_finish(this.passwordmd5);
+	md5_finish(&md, this.passwordmd5);
 
 	memset(password, 0, strlen(password));
 	free(password);
