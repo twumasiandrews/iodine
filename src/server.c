@@ -411,24 +411,30 @@ forward_query(int bind_fd, struct query *q)
 static void
 send_version_response(int fd, version_ack_t ack, uint32_t payload, int userid, struct query *q)
 {
-	char out[9];
-
+	uint8_t out[28];
+	size_t len = sizeof(out);
+	memset(out, 0, len);
+	char *s;
 	switch (ack) {
 	case VERSION_ACK:
-		strncpy(out, "VACK", sizeof(out));
+		s = "VACK";
+		memcpy(out + 8, users[userid].server_chall, 16);
+		*(uint32_t *) (out + 24) = htonl(CMC(users[userid].cmc_down));
+	break;
+	case VERSION_FULL:
+		s = "VFUL";
+		len = 9; // len == 9 for backwards compatibility
 		break;
 	case VERSION_NACK:
-		strncpy(out, "VNAK", sizeof(out));
-		break;
-	case VERSION_FULL:
-		strncpy(out, "VFUL", sizeof(out));
+	default:
+		s = "VNAK";
+		len = 9;
 		break;
 	}
-
+	memcpy(out, s, 4);
 	*(uint32_t *) (out + 4) = htonl(payload);
-	out[8] = userid & 0xff;
 
-	write_dns(fd, q, out, sizeof(out), users[userid].downenc);
+	write_dns(fd, q, out, len, 'T');
 }
 
 void
@@ -941,7 +947,7 @@ handle_raw_login(uint8_t *packet, size_t len, struct query *q, int fd, int useri
 	DEBUG(1, "RX-raw: login, len %" L "u, from user %d", len, userid);
 
 	/* User sends hash of seed + 1 */
-	login_calculate(myhash, 16, server.passwordmd5, users[userid].seed + 1);
+	//login_calculate(myhash, 16, server.passwordmd5, users[userid].seed + 1);
 	if (memcmp(packet, myhash, 16) == 0) {
 		/* Update time info for user */
 		users[userid].last_pkt = time(NULL);
@@ -952,7 +958,7 @@ handle_raw_login(uint8_t *packet, size_t len, struct query *q, int fd, int useri
 
 		/* Correct hash, reply with hash of seed - 1 */
 		user_set_conn_type(userid, CONN_RAW_UDP);
-		login_calculate(myhash, 16, server.passwordmd5, users[userid].seed - 1);
+		//login_calculate(myhash, 16, server.passwordmd5, users[userid].seed - 1);
 		send_raw(fd, (uint8_t *)myhash, 16, userid, RAW_HDR_CMD_LOGIN, &q->from, q->fromlen);
 
 		users[userid].authenticated_raw = 1;
@@ -1234,8 +1240,10 @@ write_dns(int fd, struct query *q, char *data, size_t datalen, char downenc)
 	sendto(fd, buf, len, 0, (struct sockaddr*)&q->from, q->fromlen);
 }
 
+// TODO send error codes
 #define CHECK_LEN(l, x) \
-	if (l < x) { \
+	if (l != x) { \
+		DEBUG(3, "BADLEN: expected %u, got %u", x, l); \
 		write_dns(dns_fd, q, "BADLEN", 6, 'T'); \
 		return; \
 	}
@@ -1249,14 +1257,15 @@ handle_dns_version(int dns_fd, struct query *q, uint8_t *domain, int domain_len)
 
 	read = unpack_data(unpacked, sizeof(unpacked), (uint8_t *)domain + 1, domain_len - 1, b32);
 	/* Version greeting, compare and send ack/nak */
-	if (read == 8) {
+	if (read >= 8) {
 		/* Received V + 32bits version + 32bits CMC */
 		version = ntohl(*(uint32_t *) unpacked);
-		// TODO handle CMC
 		cmc = ntohl(*(uint32_t *) (unpacked + 4));
 	} /* if invalid pkt, just send VNAK */
 
 	if (version != PROTOCOL_VERSION) {
+		DEBUG(1, "client from %s sent bad version %08X, dropping.",
+				format_addr(&q->from, q->fromlen), version);
 		send_version_response(dns_fd, VERSION_NACK, PROTOCOL_VERSION, 0, q);
 		syslog(LOG_INFO, "dropped user from %s, sent bad version %08X",
 			   format_addr(&q->from, q->fromlen), version);
@@ -1266,6 +1275,8 @@ handle_dns_version(int dns_fd, struct query *q, uint8_t *domain, int domain_len)
 	userid = find_available_user();
 	if (userid < 0) {
 		/* No space for another user */
+		DEBUG(1, "dropping client from %s, server full.",
+				format_addr(&q->from, q->fromlen), version);
 		send_version_response(dns_fd, VERSION_FULL, created_users, 0, q);
 		syslog(LOG_INFO, "dropped user from %s, server full",
 		format_addr(&q->from, q->fromlen));
@@ -1287,6 +1298,8 @@ handle_dns_version(int dns_fd, struct query *q, uint8_t *domain, int domain_len)
 	u->down_compression = 1;
 	u->lazy = 0;
 	u->next_upstream_ack = -1;
+	u->cmc_down = rand();
+	get_rand_bytes(u->server_chall, sizeof(u->server_chall));
 	window_buffer_resize(u->outgoing, u->outgoing->length,
 			u->encoder->get_raw_length(u->fragsize) - DOWNSTREAM_PING_HDR);
 	window_buffer_clear(u->incoming);
@@ -1300,14 +1313,15 @@ handle_dns_version(int dns_fd, struct query *q, uint8_t *domain, int domain_len)
 		u->downenc_bits = 5;
 	}
 
-	send_version_response(dns_fd, VERSION_ACK, u->seed, userid, q);
+	send_version_response(dns_fd, VERSION_ACK, userid, userid, q);
 
 	syslog(LOG_INFO, "Accepted version for user #%d from %s",
 		userid, format_addr(&q->from, q->fromlen));
 
 	DEBUG(1, "User %d connected with correct version from %s.",
 				userid, format_addr(&q->from, q->fromlen));
-	DEBUG(3, "User %d has login challenge 0x%08x", userid, u->seed);
+	DEBUG(3, "User %d: sc=0x%016llx%016llx", userid,
+			*(uint64_t*)u->server_chall, *(uint64_t*)(u->server_chall+8));
 }
 
 void
@@ -1358,44 +1372,17 @@ void
 handle_dns_login(int dns_fd, struct query *q, uint8_t *domain, int domain_len, int userid)
 {
 	uint8_t unpacked[512], flags;
-	char logindata[16], *tmp[2], out[512], *reason = NULL;
-	char *errormsg = NULL, fromaddr[100];
+	uint8_t logindata[16], cc[16], out[31];
+	char fromaddr[100];
 	struct in_addr tempip;
-	char remote_tcp, remote_isnt_localhost, use_ipv6, poll_status; //, drop_packets;
-	int length = 17, read, addrlen, login_ok = 1;
-	uint16_t port;
+	int read;
 	struct tun_user *u = &users[userid];
-	struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *) &u->remoteforward_addr;
-	struct sockaddr_in *addr = (struct sockaddr_in *) &u->remoteforward_addr;
 
 	read = unpack_data(unpacked, sizeof(unpacked), (uint8_t *) domain + 2, domain_len - 2, b32);
 
-	/* Decode flags and calculate min. length */
-	flags = unpacked[0];
-	remote_tcp = flags & 1;
-	remote_isnt_localhost = (flags & 2) >> 1;
-	use_ipv6 = (flags & 4) >> 2;
-	//drop_packets = (flags & 8) >> 3; /* currently unimplemented */
-	poll_status = (flags & 0x10) >> 4;
-	addrlen = (remote_tcp && remote_isnt_localhost) ? (use_ipv6 ? 16 : 4) : 0;
-
-	length += (remote_tcp ? 2 : 0) + addrlen;
-
-	/* There should be no extra data if only polling forwarding status */
-	if (poll_status) {
-		length = 17;
-	}
-
-	CHECK_LEN(read, length);
+	CHECK_LEN(read, 36);
 
 	strncpy(fromaddr, format_addr(&q->from, q->fromlen), 100);
-
-	DEBUG(2, "Received login request for user %d from %s",
-				userid, fromaddr);
-
-	DEBUG(6, "Login: length=%d, flags=0x%02x, seed=0x%08x, hash=0x%016llx%016llx",
-			  length, flags, u->seed, *(uint64_t*)(unpacked+1),
-			  *(uint64_t*)(unpacked+9));
 
 	if (check_user_and_ip(userid, q, server.check_ip) != 0) {
 		write_dns(dns_fd, q, "BADIP", 5, 'T');
@@ -1405,151 +1392,51 @@ handle_dns_login(int dns_fd, struct query *q, uint8_t *domain, int domain_len, i
 		return;
 	}
 
-	/* Check remote host/port options */
-	if ((addrlen > 0 && !server.allow_forward_remote) ||
-		(remote_tcp && !server.allow_forward_local_port)) {
-		login_ok = 0;
-		reason = "requested bad TCP forward options";
-	}
-
 	u->last_pkt = time(NULL);
-	login_calculate(logindata, server.passwordmd5, u->seed);
+	login_calculate(logindata, server.passwordmd5, u->server_chall);
+	memcpy(cc, unpacked + 16, 16);
 
-	if (memcmp(logindata, unpacked + 1, 16) != 0) {
-		login_ok = 0;
-		reason = "bad password";
-	}
+	DEBUG(2, "RX login U%d (%s): hash=0x%016llx%016llx, cc=0x%016llx%016llx",
+			  userid, fromaddr, *(uint64_t*)(unpacked), *(uint64_t*)(unpacked+8),
+			  *(uint64_t*)(cc), *(uint64_t*)(cc+8));
 
-	if (remote_tcp) {
-		port = ntohs(*(uint16_t *) (unpacked + 17));
-		if (addrlen > 0) {
-			if (use_ipv6) {
-				addr6->sin6_family = AF_INET6;
-				addr6->sin6_port = htons(port);
-				u->remoteforward_addr_len = sizeof(*addr6);
-				memcpy(&addr6->sin6_addr, unpacked + 19, MIN(sizeof(*addr6), addrlen));
-			} else {
-				addr->sin_family = AF_INET;
-				addr->sin_port = htons(port);
-				u->remoteforward_addr_len = sizeof(*addr);
-				memcpy(&addr->sin_addr, unpacked + 19, MIN(sizeof(*addr), addrlen));
-			}
-
-			DEBUG(1, "User %d requested TCP connection to %s:%hu, %s.", userid,
-				  format_addr(&u->remoteforward_addr, u->remoteforward_addr_len),
-				  port, login_ok ? "allowed" : "rejected");
-		} else {
-			addr->sin_family = AF_INET;
-			addr->sin_port = htons(port);
-			addr->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-			DEBUG(1, "User %d requested TCP connection to localhost:%hu, %s.", userid,
-				  port, login_ok ? "allowed" : "rejected");
-		}
-	}
-
-	if (poll_status && login_ok) {
-		if (addrlen > 0 || (flags ^ 0x10)) {
-			login_ok = 0;
-			reason = "invalid flags";
-		}
-	}
-
-	if (!login_ok) {
+	if (memcmp(logindata, unpacked, 16) != 0) {
 		write_dns(dns_fd, q, "LNAK", 4, 'T');
 		if (--u->authenticated >= 0)
 			u->authenticated = -1;
 		int tries = abs(u->authenticated);
-		DEBUG(1, "rejected login from user %d (%s), tries: %d, reason: %s",
-			  userid, fromaddr, tries, reason);
-		syslog(LOG_WARNING, "rejected login request from user #%d from %s, %s; incorrect attempts: %d",
-			userid, fromaddr, reason, tries);
+		DEBUG(1, "rejected login from user %d (%s), reason: bad hash, tries: %d",
+			  userid, fromaddr, tries);
+		syslog(LOG_WARNING, "rejected login from user #%d from %s; incorrect attempts: %d",
+			userid, fromaddr, tries);
 		return;
 	}
 
 	/* Store user auth OK, count number of logins */
-	u->authenticated++;
-	if (u->authenticated > 1 && !poll_status)
+	if (++u->authenticated > 1) {
 		syslog(LOG_WARNING, "duplicate login request from user #%d from %s",
 			   userid, fromaddr);
-
-	if (remote_tcp) {
-		int tcp_fd;
-
-		DEBUG(1, "User %d connected from %s, starting TCP connection to %s.", userid,
-			  fromaddr, format_addr(&u->remoteforward_addr, sizeof(struct sockaddr_storage)));
-		syslog(LOG_NOTICE, "accepted password from user #%d, connecting TCP forward", userid);
-
-		/* Open socket and connect to TCP forward host:port */
-		tcp_fd = open_tcp_nonblocking(&u->remoteforward_addr, &errormsg);
-		if (tcp_fd < 0) {
-			if (!errormsg)
-				errormsg = "Error opening socket.";
-			goto tcp_forward_error;
-		}
-
-		/* connection in progress */
-		out[0] = 'W';
-		read = 1;
-		write_dns(dns_fd, q, out, read + 1, u->downenc);
-		u->remote_tcp_fd = tcp_fd;
-		u->remote_forward_connected = 2; /* connecting */
-		return;
-	} else if (poll_status) {
-		/* Check TCP forward connection status and update user data */
-		int retval;
-
-		/* Check for connection errors */
-		if ((retval = check_tcp_error(u->remote_tcp_fd, &errormsg)) != 0) {
-			/* if unacceptable error, tell user */
-			if (retval != EINPROGRESS)
-				goto tcp_forward_error;
-		}
-
-		if (retval == EINPROGRESS)
-			u->remote_forward_connected = 2;
-
-		read = 1;
-		out[1] = 0;
-
-		/* check user TCP forward status flag, which is updated in server_tunnel
-		 * when the file descriptor becomes writable (ie, connection established */
-		if (u->remote_forward_connected == 1) {
-			out[0] = 'C';
-			DEBUG(2, "User %d TCP forward connection established: %s", userid, errormsg);
-		} else if (u->remote_forward_connected == 2) {
-			out[0] = 'W';
-			DEBUG(3, "User %d TCP connection in progress: %s", userid, errormsg);
-		}
-
-		write_dns(dns_fd, q, out, read + 1, u->downenc);
-		return;
-	} else {
-		out[0] = 'I';
-
-		/* Send ip/mtu/netmask info */
-		tempip.s_addr = server.my_ip;
-		tmp[0] = strdup(inet_ntoa(tempip));
-		tempip.s_addr = u->tun_ip;
-		tmp[1] = strdup(inet_ntoa(tempip));
-
-		read = snprintf(out + 1, sizeof(out) - 1, "-%s-%s-%d-%d",
-						tmp[0], tmp[1], server.mtu, server.netmask);
-
-		DEBUG(1, "User %d connected from %s, tun_ip %s.", userid,
-			  fromaddr, tmp[1]);
-		syslog(LOG_NOTICE, "accepted password from user #%d, given IP %s", userid, tmp[1]);
-
-		free(tmp[1]);
-		free(tmp[0]);
-		write_dns(dns_fd, q, out, read + 1, u->downenc);
-		return;
 	}
-tcp_forward_error:
-	DEBUG(1, "Failed to connect TCP forward for user %d: %s", userid, errormsg);
-	out[0] = 'E';
-	strncpy(out + 1, errormsg, sizeof(out) - 1);
-	read = strlen(out);
-	write_dns(dns_fd, q, out, read + 1, u->downenc);
+
+	/* calculate server-to-client authentication data */
+	login_calculate(logindata, server.passwordmd5, cc);
+
+	/* Send ip/mtu/netmask info */
+	*(uint32_t *) out = server.my_ip;
+	*(uint32_t *) (out + 4) = u->tun_ip;
+	*(uint16_t *) (out + 8) = htons(server.mtu);
+	out[10] = server.netmask;
+	memcpy(out + 11, logindata, 16);
+	*(uint32_t *) (out + 27) = htonl(CMC(u->cmc_down));
+
+	struct in_addr tunip;
+	tunip.s_addr = u->tun_ip;
+	char *s = inet_ntoa(tunip);
+	DEBUG(1, "User %d connected from %s, tun_ip %s, srv auth=0x%016llx%016llx",
+			userid, fromaddr, s, *(uint64_t*)logindata, *(uint64_t*)(logindata+8));
+	syslog(LOG_NOTICE, "accepted password from user #%d, given IP %s", userid, s);
+
+	write_dns(dns_fd, q, out, 31, u->downenc);
 }
 
 void
@@ -1621,6 +1508,77 @@ handle_dns_set_options(int dns_fd, struct query *q, int userid,
 	char *encname = "BADCODEC";
 
 	int tmp_lazy, tmp_downenc, tmp_comp;
+
+	// TODO handle UDP forward in options
+//	/* Decode flags and calculate min. length */
+//	flags = unpacked[0];
+//	uint16_t port;
+//	char remote_tcp, remote_isnt_localhost, use_ipv6, poll_status; //, drop_packets;
+//	struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *) &u->remoteforward_addr;
+//	struct sockaddr_in *addr = (struct sockaddr_in *) &u->remoteforward_addr;
+//	remote_tcp = flags & 1;
+//	remote_isnt_localhost = (flags & 2) >> 1;
+//	use_ipv6 = (flags & 4) >> 2;
+//	addrlen = (remote_tcp && remote_isnt_localhost) ? (use_ipv6 ? 16 : 4) : 0;
+//
+//	length += (remote_tcp ? 2 : 0) + addrlen;
+//
+//	/* Check remote host/port options */
+//	if ((addrlen > 0 && !server.allow_forward_remote) ||
+//		(remote_tcp && !server.allow_forward_local_port)) {
+//		login_ok = 0;
+//		reason = "requested bad TCP forward options";
+//	}
+//
+//	if (remote_tcp) {
+//		port = ntohs(*(uint16_t *) (unpacked + 17));
+//		if (addrlen > 0) {
+//			if (use_ipv6) {
+//				addr6->sin6_family = AF_INET6;
+//				addr6->sin6_port = htons(port);
+//				u->remoteforward_addr_len = sizeof(*addr6);
+//				memcpy(&addr6->sin6_addr, unpacked + 19, MIN(sizeof(*addr6), addrlen));
+//			} else {
+//				addr->sin_family = AF_INET;
+//				addr->sin_port = htons(port);
+//				u->remoteforward_addr_len = sizeof(*addr);
+//				memcpy(&addr->sin_addr, unpacked + 19, MIN(sizeof(*addr), addrlen));
+//			}
+//
+//			DEBUG(1, "User %d requested TCP connection to %s:%hu, %s.", userid,
+//				  format_addr(&u->remoteforward_addr, u->remoteforward_addr_len),
+//				  port, login_ok ? "allowed" : "rejected");
+//		} else {
+//			addr->sin_family = AF_INET;
+//			addr->sin_port = htons(port);
+//			addr->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+//			DEBUG(1, "User %d requested TCP connection to localhost:%hu, %s.", userid,
+//				  port, login_ok ? "allowed" : "rejected");
+//		}
+//	}
+//	if (remote_tcp) {
+//		int tcp_fd;
+//
+//		DEBUG(1, "User %d connected from %s, starting TCP connection to %s.", userid,
+//			  fromaddr, format_addr(&u->remoteforward_addr, sizeof(struct sockaddr_storage)));
+//		syslog(LOG_NOTICE, "accepted password from user #%d, connecting TCP forward", userid);
+//
+//		/* Open socket and connect to TCP forward host:port */
+//		tcp_fd = open_tcp_nonblocking(&u->remoteforward_addr, &errormsg);
+//		if (tcp_fd < 0) {
+//			if (!errormsg)
+//				errormsg = "Error opening socket.";
+//			goto tcp_forward_error;
+//		}
+//
+//		/* connection in progress */
+//		out[0] = 'W';
+//		read = 1;
+//		write_dns(dns_fd, q, out, read + 1, u->downenc);
+//		u->remote_tcp_fd = tcp_fd;
+//		u->remote_forward_connected = 2; /* connecting */
+//		return;
+//	}
 
 	/* Temporary variables: don't change anything until all options parsed */
 	tmp_lazy = users[userid].lazy;

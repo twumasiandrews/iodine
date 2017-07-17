@@ -458,17 +458,17 @@ send_packet(char cmd, const uint8_t *data, const size_t datalen)
  * data and 3 bytes base32 encoded CMC
  * Returns ID of sent query */
 {
-	uint8_t buf[512], data_with_cmc[datalen + 2];
+	uint8_t buf[512], data_with_cmc[datalen];
 
 	if (data)
 		memcpy(data_with_cmc, data, datalen);
-	*(uint16_t *) (data_with_cmc + datalen) = this.rand_seed;
-	this.rand_seed++;
+	//*(uint16_t *) (data_with_cmc + datalen) = this.rand_seed;
+	//this.rand_seed++;
 
 	buf[0] = cmd;
 	buf[1] = this.userid_char;
 
-	build_hostname(buf, sizeof(buf), data_with_cmc, datalen + 2,
+	build_hostname(buf, sizeof(buf), data_with_cmc, datalen, // + 2,
 				   this.topdomain, b32, this.hostname_maxlen, 2);
 
 	return send_query(buf);
@@ -1478,7 +1478,7 @@ send_version(uint32_t version)
 	uint8_t data[8], buf[512];
 
 	*(uint32_t *) data = htonl(version);
-	*(uint32_t *) (data + 4) = (uint32_t) rand(); /* CMC */
+	*(uint32_t *) (data + 4) = htonl(CMC(this.cmc_up)); /* CMC */
 
 	buf[0] = 'v';
 
@@ -1489,58 +1489,21 @@ send_version(uint32_t version)
 }
 
 static void
-send_login(char *login, int len)
-/* Send DNS login packet. See doc/proto_xxxxxxxx.txt for details */
+send_login(uint8_t *login, uint8_t *cc)
+/* Send DNS login packet. See doc/proto_xxxxxxxx.txt for details
+ * login and cc must point to buffers of 16 bytes login hash / client challenge */
 {
-	uint8_t flags = 0, data[100];
-	int length = 17, addrlen = 0;
-	uint16_t port;
+	uint8_t data[36];
 
-	if (len != 16)
-		DEBUG(1, "Login calculated incorrect length hash! len=%d", len);
+	DEBUG(6, "TX login: hash=0x%016llx%016llx, cc=0x%016llx%016llx, cmc=",
+		  *(uint64_t*)(login), *(uint64_t*)(login+8), *(uint64_t*)cc,
+		  *(uint64_t*)(cc+8), this.cmc_up);
 
-	memcpy(data + 1, login, 16);
+	memcpy(data, login, 16);
+	memcpy(data + 16, cc, 16);
+	*(uint32_t *)(data + 32) = htonl(CMC(this.cmc_up));
 
-	/* if remote forward address is specified and not currently connecting */
-	if (this.remote_forward_connected != 2 &&
-		this.remote_forward_addr.ss_family != AF_UNSPEC) {
-		struct sockaddr_in6 *s6 = (struct sockaddr_in6 *) &this.remote_forward_addr;
-		struct sockaddr_in *s = (struct sockaddr_in *) &this.remote_forward_addr;
-
-		port = (this.remote_forward_addr.ss_family == AF_INET ? s->sin_port : s6->sin6_port);
-
-		*(uint16_t *) (data + length) = port;
-
-		flags |= 1;
-		length += 2;
-		/* set remote IP to be non-localhost if this.remote_forward_addr set */
-		if (this.remote_forward_addr.ss_family == AF_INET && s->sin_addr.s_addr != INADDR_LOOPBACK) {
-			if (this.remote_forward_addr.ss_family == AF_INET6) { /* IPv6 address */
-				addrlen = sizeof(s6);
-				flags |= 4;
-				memcpy(data + length, &s6->sin6_addr, addrlen);
-			} else { /* IPv4 address */
-				flags |= 2;
-				addrlen = sizeof(s);
-				memcpy(data + length, &s->sin_addr, addrlen);
-			}
-
-			length += addrlen;
-		}
-		DEBUG(2, "Sending TCP forward login request: port %hu, length %d, addrlen %d",
-			  port, length, addrlen);
-	} else if (this.remote_forward_connected == 2) {
-		/* remote TCP forward connection in progress */
-		DEBUG(2, "Sending TCP forward login/poll request to check connection status.");
-		flags |= (1 << 4);
-	}
-
-	data[0] = flags;
-
-	DEBUG(6, "Sending login request: length=%d, flags=0x%02x, hash=0x%016llx%016llx",
-		  length, flags, *(unsigned long long *) (data + 1), *(unsigned long long *) (data + 9));
-
-	send_packet('l', data, length);
+	send_packet('l', data, sizeof(data));
 }
 
 static void
@@ -1579,7 +1542,8 @@ static void
 send_raw_udp_login(int seed)
 {
 	char buf[16];
-	login_calculate(buf, sizeof(buf), this.passwordmd5, seed + 1);
+	// TODO fix raw UDP login client
+	//login_calculate(buf, sizeof(buf), this.passwordmd5, seed + 1);
 
 	send_raw((uint8_t *) buf, sizeof(buf), RAW_HDR_CMD_LOGIN);
 }
@@ -1609,11 +1573,48 @@ send_server_options(int lazy, int compression, char denc)
 	optflags |= (compression & 1) << 1;
 	optflags |= lazy & 1;
 
+	// TODO UDP forwarding in options command
+	//	/* if remote forward address is specified and not currently connecting */
+	//	if (this.remote_forward_connected != 2 &&
+	//		this.remote_forward_addr.ss_family != AF_UNSPEC) {
+	//		struct sockaddr_in6 *s6 = (struct sockaddr_in6 *) &this.remote_forward_addr;
+	//		struct sockaddr_in *s = (struct sockaddr_in *) &this.remote_forward_addr;
+	//
+	//		port = (this.remote_forward_addr.ss_family == AF_INET ? s->sin_port : s6->sin6_port);
+	//
+	//		*(uint16_t *) (data + length) = port;
+	//
+	//		flags |= 1;
+	//		length += 2;
+	//		/* set remote IP to be non-localhost if this.remote_forward_addr set */
+	//		if (this.remote_forward_addr.ss_family == AF_INET && s->sin_addr.s_addr != INADDR_LOOPBACK) {
+	//			if (this.remote_forward_addr.ss_family == AF_INET6) { /* IPv6 address */
+	//				addrlen = sizeof(s6);
+	//				flags |= 4;
+	//				memcpy(data + length, &s6->sin6_addr, addrlen);
+	//			} else { /* IPv4 address */
+	//				flags |= 2;
+	//				addrlen = sizeof(s);
+	//				memcpy(data + length, &s->sin_addr, addrlen);
+	//			}
+	//
+	//			length += addrlen;
+	//		}
+	//		DEBUG(2, "Sending TCP forward login request: port %hu, length %d, addrlen %d",
+	//			  port, length, addrlen);
+	//	} else if (this.remote_forward_connected == 2) {
+	//		/* remote TCP forward connection in progress */
+	//		DEBUG(2, "Sending TCP forward login/poll request to check connection status.");
+	//		flags |= (1 << 4);
+	//	}
+
+
 	send_packet('o', &optflags, 1);
 }
 
+/* takes server challenge (16 bytes) as argument */
 static int
-handshake_version(int *seed)
+handshake_version(uint8_t *sc)
 {
 	char hex[] = "0123456789abcdef";
 	char hex2[] = "0123456789ABCDEF";
@@ -1632,13 +1633,24 @@ handshake_version(int *seed)
 			payload = ntohl(*(uint32_t *) (in + 4));
 
 			if (strncmp("VACK", (char *)in, 4) == 0) {
-				/* Payload is login challenge */
-				*seed = payload;
-				this.userid = in[8];
+				if (read != 28) {
+					fprintf(stderr, "Bad version check reply from server, trying again...");
+					continue;
+				}
+				/* Payload is new userid, and there will also be 16 bytes
+				 * server challenge. */
+				for (size_t p = 0; p < 16; p++) {
+					sc[p] = *(in + 8 + p);
+				}
+				/* Set CMC to starting value given by server. */
+				this.cmc_down = ntohl(*(uint32_t *) (in + 24));
+
+				this.userid = payload;
 				this.userid_char = hex[this.userid & 15];
 				this.userid_char2 = hex2[this.userid & 15];
 
-				DEBUG(2, "Login challenge: 0x%08x", *seed);
+				DEBUG(2, "Login: sc=0x%016llx%016llx, cmc_up=%08x, cmc_dn=%08x",
+						*(uint64_t*)sc, *(uint64_t*)(sc+8), this.cmc_up, this.cmc_down);
 
 				fprintf(stderr, "Version ok, both using protocol v 0x%08x. You are user #%d\n",
 					PROTOCOL_VERSION, this.userid);
@@ -1663,90 +1675,56 @@ handshake_version(int *seed)
 }
 
 static int
-handshake_login(int seed)
+handshake_login(uint8_t *sc)
 {
-	char in[4096], login[16], server[65], client[65], flag;
-	int mtu, netmask, read, numwaiting = 0;
+	uint8_t in[40], clogin[16], slogin[16], cc[16];
+	uint8_t server[16], client[16], netmask;
+	uint16_t mtu;
+	int read, numwaiting = 0;
+	struct in_addr ip;
 
-	login_calculate(login, 16, this.passwordmd5, seed);
+	// generate client-to-server login challenge and hashes
+	get_rand_bytes(cc, sizeof(cc));
+	login_calculate(clogin, this.passwordmd5, sc);
+	login_calculate(slogin, this.passwordmd5, cc);
 
 	for (int i = 0; this.running && i < 5; i++) {
 
-		send_login(login, 16);
+		send_login(clogin, cc);
 
+		// TODO handle LNAK/BADAUTH error code somewhere.
+		//				fprintf(stderr, "Bad password\n");
+		// 				return 1;
 		read = handshake_waitdns(in, sizeof(in), 'L', i + 1);
-		in[MIN(read, sizeof(in))] = 0; /* Null terminate */
 
-		if (read > 0) {
-			if (strncmp("LNAK", in, 4) == 0) {
-				fprintf(stderr, "Bad password\n");
-				return 1;
-				/* not reached */
-			}
-			flag = toupper(in[0]);
-
-			switch (flag) {
-				case 'I':
-					if (sscanf(in, "%c-%64[^-]-%64[^-]-%d-%d",
-								&flag, server, client, &mtu, &netmask) == 5) {
-
-						server[64] = 0;
-						client[64] = 0;
-						if (tun_setip(client, server, netmask) == 0 &&
-							tun_setmtu(mtu) == 0) {
-
-							fprintf(stderr, "Server tunnel IP is %s\n", server);
-							return 0;
-						} else {
-							errx(4, "Failed to set IP and MTU");
-						}
-					} else {
-						goto bad_handshake;
-					}
-					break;
-				case 'C':
-					if (!this.use_remote_forward) {
-						goto bad_handshake;
-					}
-
-					this.remote_forward_connected = 1;
-					fprintf(stderr, " done.");
-					return 0;
-				case 'W':
-					if (!this.use_remote_forward || this.remote_forward_connected == 1) {
-						goto bad_handshake;
-					}
-
-					this.remote_forward_connected = 2;
-
-					if (numwaiting == 0)
-						fprintf(stderr, "server: Opening Remote TCP forward.\n");
-					else
-						fprintf(stderr, "%.*s", numwaiting, "...............");
-
-					numwaiting ++;
-
-					/* wait a while before re-polling server, max 5 tries (14 seconds) */
-					if (numwaiting > 1)
-						sleep(numwaiting);
-
-					continue;
-				case 'E':
-					if (!this.use_remote_forward)
-						goto bad_handshake;
-
-					char errormsg[100];
-					strncpy(errormsg, in + 1, MIN(read, sizeof(errormsg)));
-					errormsg[99] = 0;
-					fprintf(stderr, "server: Remote TCP forward connection failed: %s\n", errormsg);
-					return 1;
-				default:
-					/* undefined flag */
-					bad_handshake:
-					fprintf(stderr, "Received bad handshake: %.*s\n", read, in);
-					break;
+		if (read == 31) {
+			/* confirm server identity by checking the hash */
+			if (memcmp(in + 11, slogin, 16) != 0) {
+				DEBUG(1, "hash mismatch! server: 0x%016llx%016llx, actual: 0x%016llx%016llx",
+						*(uint64_t*)(in+11), *(uint64_t*)(in+19),
+						*(uint64_t*)slogin, *(uint64_t*)(slogin+8))
+				fprintf(stderr, "Server authentication failed: hash mismatch! Trying again...\n");
+				continue;
 			}
 
+			// TODO deal with only UDP forwarding (possibly built without TUN support)
+			ip.s_addr = *(uint32_t *) in;
+			strncpy(server, inet_ntoa(ip), sizeof(server));
+			ip.s_addr = *(uint32_t *) (in + 4);
+			strncpy(client, inet_ntoa(ip), sizeof(client));
+			mtu = ntohs(*(uint16_t *) (in + 8));
+			netmask = in[10];
+
+			if (tun_setip(client, server, netmask) == 0 && tun_setmtu(mtu) == 0) {
+				fprintf(stderr, "Server tunnel IP/netmask is %s/%hhu, our IP is %s\n",
+						server, netmask, client);
+				return 0;
+			} else {
+				errx(4, "Failed to set IP and MTU");
+			}
+
+		} else {
+			DEBUG(1, "Bad login reply from server: wrong len (%d != 31)", read);
 		}
 
 		fprintf(stderr, "Retrying login...\n");
@@ -1760,7 +1738,7 @@ handshake_login(int seed)
 }
 
 static int
-handshake_raw_udp(int seed)
+handshake_raw_udp()
 {
 	struct timeval tv;
 	char in[4096];
@@ -1769,6 +1747,8 @@ handshake_raw_udp(int seed)
 	int r;
 	int len;
 	int got_addr;
+	// TODO fix raw UDP login
+	int seed = 0;
 
 	memset(&this.raw_serv, 0, sizeof(this.raw_serv));
 	got_addr = 0;
@@ -1834,7 +1814,7 @@ handshake_raw_udp(int seed)
 			len = recv(this.dns_fd, in, sizeof(in), 0);
 			if (len >= (16 + RAW_HDR_LEN)) {
 				char hash[16];
-				login_calculate(hash, 16, this.passwordmd5, seed - 1);
+				// login_calculate(hash, 16, this.passwordmd5, seed - 1);
 				if (memcmp(in, raw_header, RAW_HDR_IDENT_LEN) == 0
 					&& RAW_HDR_GET_CMD(in) == RAW_HDR_CMD_LOGIN
 					&& memcmp(&in[RAW_HDR_LEN], hash, sizeof(hash)) == 0) {
@@ -2633,7 +2613,7 @@ handshake_set_timeout()
 int
 client_handshake()
 {
-	int seed;
+	uint8_t server_chall[16];
 	int upcodec;
 	int r;
 
@@ -2649,15 +2629,17 @@ client_handshake()
 
 	fprintf(stderr, "Using DNS type %s queries\n", client_get_qtype());
 
-	if ((r = handshake_version(&seed))) {
+	this.cmc_up = rand();
+
+	if ((r = handshake_version(server_chall))) {
 		return r;
 	}
 
-	if ((r = handshake_login(seed))) {
+	if ((r = handshake_login(server_chall))) {
 		return r;
 	}
 
-	if (this.raw_mode && handshake_raw_udp(seed)) {
+	if (this.raw_mode && handshake_raw_udp()) {
 		this.conn = CONN_RAW_UDP;
 		this.max_timeout_ms = 10000;
 		this.compression_down = 1;

@@ -38,6 +38,8 @@ struct client_instance {
 	int raw_mode;
 	int foreground;
 	char passwordmd5[16];
+	uint32_t cmc_up;
+	uint32_t cmc_down;
 
 	/* DNS nameserver info */
 	char **nameserv_hosts;

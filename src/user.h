@@ -25,7 +25,6 @@
 #define USERS 16
 
 struct tun_user {
-	uint8_t client_chall[16];
 	uint8_t server_chall[16];
 	struct timeval dns_timeout;
 	struct sockaddr_storage host;
@@ -39,6 +38,8 @@ struct tun_user {
 	socklen_t remoteforward_addr_len; /* 0 if no remote forwarding enabled */
 	time_t last_pkt;
 	in_addr_t tun_ip;
+	uint32_t cmc_up;
+	uint32_t cmc_down;
 	int remote_tcp_fd;
 	int remote_forward_connected; /* 0 if not connected, -1 if error or 1 if OK */
 	int next_upstream_ack;

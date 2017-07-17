@@ -88,7 +88,7 @@ struct server_instance {
 	/* Global server variables */
 	int running;
 	char *topdomain;
-	char passwordmd5[16];
+	uint8_t passwordmd5[16];
 	int check_ip;
 	int my_mtu;
 	in_addr_t my_ip;
