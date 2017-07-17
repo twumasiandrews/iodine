@@ -85,44 +85,38 @@ Client sends (length 1+8):
 	Rest encoded with base32:
 	4 bytes big endian protocol version
 	4 bytes random CMC
-Server replies:
-	1 char:
-		A (version ok), followed by login challenge
-		N (version differs), followed by server protocol version
-		F (server has no free slots), followed by max users
+Server replies (length 28, or 9 if bad version/full):
+	4 chars:
+		VACK (version ok), followed by login challenge
+		VNAK (version differs), followed by server protocol version
+		VFUL (server has no free slots), followed by max users
 	4 byte value: means new userid/server protocol version/max users
 	16 byte server login challenge
-Note: The CMC value is used as a "seed", so following the version command
+	4 byte random CMC
+Note: The CMC values are used as a "seed", so following the version command
 all queries must be sent with CMC of ((previous CMC + 1) % MAX_UINT32).
 The server response also contains random "downstream" CMC which has the same
 requirements, although only applies to downstream traffic.
 
 Login:
-Client sends (length 2+37):
+Client sends (length 2+36):
 	First byte l or L
 	1 byte userid char (hex)
 	Rest encoded with base32:
-	1 byte flags: (least to most significant bits)
-		0: connect to remote TCP port (data pipe/ProxyCommand mode)
-		1: use non-localhost remote IP
-		2: remote IP is IPv6
-		3: check forward connected status
-		4-8: unused
 	16 bytes hash of password + server login challenge
 	16 bytes client login challenge
 	4 bytes CMC
-Server replies:
+Server replies (length 31):
 	BADAUTH if bad login
 	4 bytes server IPv4 address (network byte order)
 	4 bytes client IPv4 address (network byte order)
 	2 bytes MTU (network byte order)
 	1 byte netmask bits (like CIDR)
 	16 bytes hash of password + client login challenge
+	4 bytes CMC
 If the requested UDP forwarding options are not accepted by the server, the
 response is simply LNAK.
-Since UDP is connectionless, the server just sends packets to the given IP/port
-when data is received from the client, and will forward any packets received from
-that same IP/port back to the client.
+
 
 The login process is outlined as follows:
 	1. Successful version check; server provides a 16-byte login challenge to
@@ -176,30 +170,36 @@ Client sends:
     12 bytes HMAC
 	1 byte option flags:
     +76543210+
-    |0LKUICCC|
+    |URILKCCC|
     +--------+
-	2 bytes remote UDP port (big endian) - appears only when U-flag is set
-	4-16 bytes remote IP address (4 bytes if IPv4 or 16 for IPv6) - included
-	 only if flags U and I are set)
+	0-2 bytes remote UDP port (network byte order): 0 bytes if URI=0XX,
+		2 bytes if URI=1XX
+	0-16 bytes remote IP address: 0 bytes if URI=100, 4 bytes if URI=110 (IPv4)
+		or 16 bytes if URI=111 (IPv6)
+	 
 Server sends:
 	BADCODEC if not accepted. Previous situation remains.
 	BADAUTH if bad auth
-	1 byte accepted codec type
+	1 byte = flag byte sent by client if all options accepted
 	
 Option flags:
+	U: UDP forward enabled
+	R: Remote IP address is NOT localhost
+	I: 0=IPv4, 1=IPv6
 	L: Lazy mode enabled, server will keep a number of requests waiting until
 		data becomes available to send downstream or the requests time out.
 		The timeout value for requests is controlled by the client.
 		Applies only to data transfer; handshake is always answered immediately.
 		See section "Lazy mode operation".
 	K: Downstream compression enabled (compressed before encoding)
-	U: UDP forward enabled
-	I: 0=IPv4, 1=IPv6
 	CCC: Codec field (see codec types in section "Query and response format")
 	If codec unsupported for request type, server will use Base32; note
 	that server will answer any mix of request types that a client sends.
 	Server may disregard the encoding options; client must always use the
 	downstream encoding type indicated in every downstream DNS packet.
+	Since UDP is connectionless, the server just sends packets to the given
+	IP/port	when data is received from the client, and will forward any packets
+	received from that same IP/port back to the client.
 
 
 Probe downstream fragment size:
