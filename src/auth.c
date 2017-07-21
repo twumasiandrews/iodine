@@ -32,6 +32,17 @@
 #include "md5.h"
 #include "hmac_md5.h"
 
+void
+bitwise_xor(uint8_t *data, size_t datalen, uint8_t *key, size_t keylen)
+{
+	size_t d = 0, k = 0;
+	while (d < datalen && k < keylen) {
+		data[d] ^= key[k];
+		d++;
+		k = (k + 1 > keylen) ? 0 : k + 1;
+	}
+}
+
 /* Calculates login hash based on description in docs/proto_00000801.txt,
  * section "Login process". Requires 16-byte server/client challenge and
  * password. All bufs must be >=16 bytes. */
@@ -44,9 +55,7 @@ login_calculate(uint8_t *buf, uint8_t *passmd5,	uint8_t *chall)
 
 	memcpy(temp, passmd5, 16);
 
-	for (i = 0; i < 16; i++) {
-		temp[i] ^= chall[i];
-	}
+	bitwise_xor(temp, 16, chall, 16);
 
 	md5_init(&ctx);
 	md5_append(&ctx, temp, 16);
@@ -82,9 +91,8 @@ hmac_key_calculate(uint8_t *out,
 	md5_append(&h, cc, ccl);
 	md5_finish(&h, buf + 32);
 
-	for (int i = 0; i < 64; i++) {
-		buf[i] ^= 0xB5;
-	}
+	uint8_t k = 0xB5;
+	bitwise_xor(buf, 64, &k, 1);
 
 	md5_init(&h);
 	md5_append(&h, buf, 64);

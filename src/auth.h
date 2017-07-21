@@ -19,6 +19,7 @@
 #ifndef __LOGIN_H__
 #define __LOGIN_H__
 
+void bitwise_xor(uint8_t *data, uint8_t *key, size_t len);
 void login_calculate(uint8_t *, uint8_t *, uint8_t *);
 void hmac_key_calculate(uint8_t *out,
 		uint8_t *sc, size_t scl,
