@@ -32,14 +32,19 @@ struct nameserv {
 };
 
 struct client_instance {
-	int max_downstream_frag_size;
 	int autodetect_frag_size;
-	int hostname_maxlen;
-	int raw_mode;
-	int foreground;
-	char passwordmd5[16];
-	uint32_t cmc_up;
-	uint32_t cmc_down;
+	int hostname_maxlen;	/* maximum length of generated hostnames (incl. topdomain) */
+	int raw_mode;			/* enable raw UDP mode */
+	int autodetect_server_timeout;
+	int autodetect_delay_variance;
+	int debug;		/* enable debug level */
+	int stats;		/* enable stats printout every # seconds */
+	int running;	/* always == 1 unless shutting down */
+	int connected;	/* connection is established after login successful */
+	int lazymode;	/* lazymode enabled */
+
+	uint8_t passwordmd5[16];
+	uint8_t hmac_key[16];
 
 	/* DNS nameserver info */
 	char **nameserv_hosts;
@@ -56,49 +61,40 @@ struct client_instance {
 	int use_remote_forward; /* 0 if no forwarding used */
 	int remote_forward_connected;
 
-	int tun_fd;
-	int dns_fd;
+	int tun_fd;		/* file descriptor of tunnel interface */
+	int dns_fd;		/* file descriptor of DNS UDP socket */
 
 #ifdef OPENBSD
 	int rtable;
 #endif
-	int running;
 
-	/* Output flags for debug and time between stats update */
-	int debug;
-	int stats;
 
-	uint16_t rand_seed;
+	uint16_t rand_seed; /* TODO remove this */
 
 	/* Current up/downstream window data */
 	struct frag_buffer *outbuf;
 	struct frag_buffer *inbuf;
 	size_t windowsize_up;
 	size_t windowsize_down;
+	size_t maxfragsize_down;
 	size_t maxfragsize_up;
+	int next_downstream_ack; /* Next downstream seqID to be ACK'd (-1 if none pending) */
 
-	/* Next downstream seqID to be ACK'd (-1 if none pending) */
-	int next_downstream_ack;
-
-	/* Remembering queries we sent for tracking purposes */
-	struct query_tuple *pending_queries;
-	size_t num_pending;
+	/* Connection statistics and tracking */
+	struct query_tuple *pending_queries;	/* query tracking data */
+	size_t num_pending;				/* number of queries in pending_queries */
+	uint16_t lastid;		/* id of last sent query */
+	uint16_t do_qtype;		/* set query type to send */
+	uint32_t cmc_up;		/* CMC of next query */
+	uint32_t cmc_down;		/* highest CMC of downstream replies */
 	time_t max_timeout_ms;
 	time_t send_interval_ms;
 	time_t min_send_interval_ms;
-
-	/* Server response timeout in ms and downstream window timeout */
-	time_t server_timeout_ms;
+	time_t server_timeout_ms;	/* Server response timeout in ms and downstream window timeout */
 	time_t downstream_timeout_ms;
 	double downstream_delay_variance;
-	int autodetect_server_timeout;
-	int autodetect_delay_variance;
-
-	/* Cumulative Round-Trip-Time in ms */
-	time_t rtt_total_ms;
+	time_t rtt_total_ms;	/* Cumulative Round-Trip-Time in ms */
 	size_t num_immediate;
-
-	/* Connection statistics */
 	size_t num_timeouts;
 	size_t num_untracked;
 	size_t num_servfail;
@@ -111,34 +107,17 @@ struct client_instance {
 	size_t num_frags_recv;
 	size_t num_pings;
 
-	/* My userid at the server */
-	char userid;
+	char userid;			/* My userid at the server */
 	char userid_char;		/* used when sending (lowercase) */
 	char userid_char2;		/* also accepted when receiving (uppercase) */
 
-	uint16_t chunkid;
-
-	/* The encoder used for data packets
-	 * Defaults to Base32, can be changed after handshake */
-	struct encoder *dataenc;
-
-	/* Upstream/downstream compression flags */
-	int compression_up;
+	struct encoder *dataenc;	/* encoder struct for downstream data */
+	char downenc;			/* encoder type char to use for downstream data */
+	int compression_up;		/* Upstream/downstream compression flags */
 	int compression_down;
-
-	/* The encoder to use for downstream data */
-	char downenc;
-
-	/* set query type to send */
-	uint16_t do_qtype;
-
-	/* My connection mode */
-	enum connection conn;
-	int connected;
-
-	int lazymode;
-	long send_ping_soon;
-	time_t lastdownstreamtime;
+	enum connection conn;	/* connection mode (NULL/RAW) */
+	long send_ping_soon;	/* if >0, force ping in # ms */
+	time_t lastdownstreamtime;	/* timestamp of last received packet from server */
 };
 
 struct query_tuple {

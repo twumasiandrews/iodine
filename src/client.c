@@ -135,7 +135,7 @@ client_set_hostname_maxlen(size_t i)
 {
 	if (i <= 0xFF && i != this.hostname_maxlen) {
 		this.hostname_maxlen = i;
-		this.maxfragsize_up = get_raw_length_from_dns(this.hostname_maxlen - UPSTREAM_HDR,
+		this.maxfragsize_up = get_raw_length_from_dns(this.hostname_maxlen - UPSTREAM_DATA_HDR,
 				this.dataenc, this.topdomain);
 		if (this.outbuf)
 			window_buffer_resize(this.outbuf, this.outbuf->length, this.maxfragsize_up);
@@ -363,23 +363,25 @@ send_query(uint8_t *hostname)
 
 	DEBUG(3, "TX: pkt len %" L "u: hostname '%s'", strlen((char *)hostname), hostname);
 
-	this.chunkid += 7727;
-	if (this.chunkid == 0)
+	this.lastid += 7727;
+	if (this.lastid == 0)
 		/* 0 is used as "no-query" in iodined.c */
-		this.chunkid = rand() & 0xFF;
+		this.lastid = rand() & 0xFF;
 
-	q.id = this.chunkid;
+	q.id = this.lastid;
 	q.type = this.do_qtype;
 
-	len = dns_encode((char *)packet, sizeof(packet), &q, QR_QUERY, (char *)hostname, strlen((char *)hostname));
+	len = dns_encode((char *)packet, sizeof(packet), &q,
+			QR_QUERY, (char *)hostname, strlen((char *)hostname));
 	if (len < 1) {
 		warnx("dns_encode doesn't fit");
 		return -1;
 	}
 
-	DEBUG(4, "  Sendquery: id %5d name[0] '%c'", q.id, hostname[0]);
+	DEBUG(4, "  TX: Qid %5d name[0] '%c'", q.id, hostname[0]);
 
-	sendto(this.dns_fd, packet, len, 0, (struct sockaddr*) &this.nameserv_addrs[this.current_nameserver].addr,
+	sendto(this.dns_fd, packet, len, 0,
+			(struct sockaddr*)&this.nameserv_addrs[this.current_nameserver].addr,
 			this.nameserv_addrs[this.current_nameserver].len);
 
 	client_rotate_nameserver();
@@ -428,20 +430,23 @@ send_query(uint8_t *hostname)
 static void
 send_raw(uint8_t *buf, size_t buflen, int cmd)
 {
-	char packet[4096];
-	int len;
+	uint8_t packet[4096], hmac[16];
 
-	len = MIN(sizeof(packet) - RAW_HDR_LEN, buflen);
+	size_t len = MIN(sizeof(packet) - RAW_HDR_LEN, buflen);
 
+	/* construct raw packet for HMAC */
 	memcpy(packet, raw_header, RAW_HDR_LEN);
-	if (len) {
-		memcpy(&packet[RAW_HDR_LEN], buf, len);
-	}
-
 	len += RAW_HDR_LEN;
 	packet[RAW_HDR_CMD] = (cmd & 0xF0) | (this.userid & 0x0F);
+	*(uint32_t *) (packet + RAW_HDR_CMC) = htonl(CMC(this.cmc_up));
+	memcpy(packet + RAW_HDR_LEN, buf, len);
 
-	sendto(this.dns_fd, packet, len, 0, (struct sockaddr*)&this.raw_serv, sizeof(this.raw_serv));
+	/* calculate HMAC and insert into header */
+	hmac_md5(hmac, this.hmac_key, 16, packet, len);
+	memcpy(packet + RAW_HDR_HMAC, hmac, RAW_HDR_HMAC_LEN);
+
+	sendto(this.dns_fd, packet, len, 0, (struct sockaddr*)&this.raw_serv,
+			this.raw_serv_len);
 }
 
 static void
@@ -452,23 +457,43 @@ send_raw_data(uint8_t *data, size_t datalen)
 
 
 static int
-send_packet(char cmd, const uint8_t *data, const size_t datalen)
+send_packet(char cmd, const uint8_t *rawdata, const size_t rawdatalen, const int hmaclen)
 /* Base32 encodes data and sends as single DNS query
  * cmd becomes first byte of query, followed by hex userid, encoded
- * data and 3 bytes base32 encoded CMC
+ * data and 4 bytes base32 encoded CMC
  * Returns ID of sent query */
 {
-	uint8_t buf[512], data_with_cmc[datalen];
+	uint8_t buf[512], data[rawdatalen + 4 + hmaclen], hmac[16];
 
-	if (data)
-		memcpy(data_with_cmc, data, datalen);
-	//*(uint16_t *) (data_with_cmc + datalen) = this.rand_seed;
-	//this.rand_seed++;
+	if (rawdata && rawdatalen) {
+		memcpy(data + 4 + hmaclen, rawdata, rawdatalen);
+	}
+	*(uint32_t *) data = htonl(CMC(this.cmc_up));
 
 	buf[0] = cmd;
 	buf[1] = this.userid_char;
 
-	build_hostname(buf, sizeof(buf), data_with_cmc, datalen, // + 2,
+	if (hmaclen) {
+		/* calculate HMAC as specified in doc/proto_00000801.txt
+		 * section "Protocol security" */
+		/*	1. The packet is prepared (assembled in case of sending, decoded to the point
+				where the HMAC field is available in case of receiving).
+			2. The HMAC field is set to 0 (since it is included in the data to be signed,
+				but at the same time cannot sign itself).
+			3. The userid byte is XORed with the first byte of the decoded data.
+			4. The command byte (if present) is XORed with the 2nd byte of decoded data.
+			5. The HMAC is calculated using the decoded data and decoded data length.
+			6. Receiving: the calculated HMAC is compared to the value in the original packet.
+				Sending: the calculated HMAC is inserted into the HMAC field, and the raw
+				data is encoded as necessary. */
+		memset(data + 4, 0, hmaclen);
+		data[0] ^= this.userid_char;
+		data[1] ^= tolower(cmd);
+		hmac_md5(hmac, this.hmac_key, 16, data, sizeof(data));
+		memcpy(data + 4, hmac, hmaclen);
+	}
+
+	build_hostname(buf, sizeof(buf), data, sizeof(data),
 				   this.topdomain, b32, this.hostname_maxlen, 2);
 
 	return send_query(buf);
@@ -507,7 +532,7 @@ send_ping(int ping_response, int ack, int set_timeout, int disconnect)
 				this.server_timeout_ms, this.downstream_timeout_ms,
 				data[8], this.outbuf->windowsize, this.inbuf->windowsize);
 
-		id = send_packet('p', data, sizeof(data));
+		id = send_packet('p', data, sizeof(data), 12);
 
 		/* Log query ID as being sent now */
 		query_sent_now(id);
@@ -872,7 +897,7 @@ handshake_waitdns(char *buf, size_t buflen, char cmd, int timeout)
 		rv = read_dns_withq((uint8_t *)buf, buflen, &q);
 
 		qcmd = toupper(q.name[0]);
-		if (q.id != this.chunkid || qcmd != cmd) {
+		if (q.id != this.lastid || qcmd != cmd) {
 			DEBUG(1, "Ignoring unfitting reply id %d starting with '%c'", q.id, q.name[0]);
 			continue;
 		}
@@ -921,7 +946,7 @@ handshake_waitdns(char *buf, size_t buflen, char cmd, int timeout)
 int
 parse_data(uint8_t *data, size_t len, fragment *f, int *immediate, int *ping)
 {
-	size_t headerlen = DOWNSTREAM_HDR;
+	size_t headerlen = DOWNSTREAM_DATA_HDR;
 	int error;
 
 	f->seqID = data[0];
@@ -1072,7 +1097,7 @@ tunnel_dns()
 		return -1;	/* nothing done */
 	}
 
-	if (read < DOWNSTREAM_HDR) {
+	if (read < DOWNSTREAM_DATA_HDR) {
 		/* Maybe SERVFAIL etc. Send ping to get things back in order,
 		   but wait a bit to prevent fast ping-pong loops.
 		   Only change options if user hasn't specified server timeout */
@@ -1493,17 +1518,16 @@ send_login(uint8_t *login, uint8_t *cc)
 /* Send DNS login packet. See doc/proto_xxxxxxxx.txt for details
  * login and cc must point to buffers of 16 bytes login hash / client challenge */
 {
-	uint8_t data[36];
+	uint8_t data[32];
 
-	DEBUG(6, "TX login: hash=0x%016llx%016llx, cc=0x%016llx%016llx, cmc=",
+	DEBUG(6, "TX login: hash=0x%016llx%016llx, cc=0x%016llx%016llx, cmc=%u",
 		  *(uint64_t*)(login), *(uint64_t*)(login+8), *(uint64_t*)cc,
 		  *(uint64_t*)(cc+8), this.cmc_up);
 
 	memcpy(data, login, 16);
 	memcpy(data + 16, cc, 16);
-	*(uint32_t *)(data + 32) = htonl(CMC(this.cmc_up));
 
-	send_packet('l', data, sizeof(data));
+	send_packet('l', data, sizeof(data), 0);
 }
 
 static void
@@ -1520,7 +1544,7 @@ send_fragsize_probe(uint16_t fragsize)
 	*(uint16_t *) (data) = htons(fragsize);
 	this.rand_seed++;
 
-	send_packet('r', data, sizeof(data));
+	send_packet('r', data, sizeof(data), 12);
 }
 
 static void
@@ -1529,29 +1553,27 @@ send_set_downstream_fragsize(uint16_t fragsize)
 	uint8_t data[2];
 	*(uint16_t *) data = htons(fragsize);
 
-	send_packet('n', data, sizeof(data));
+	send_packet('n', data, sizeof(data), 12);
 }
 
 static void
 send_ip_request()
 {
-	send_packet('i', NULL, 0);
+	send_packet('i', NULL, 0, 12);
 }
 
 static void
 send_raw_udp_login(int seed)
 {
-	char buf[16];
-	// TODO fix raw UDP login client
-	//login_calculate(buf, sizeof(buf), this.passwordmd5, seed + 1);
-
-	send_raw((uint8_t *) buf, sizeof(buf), RAW_HDR_CMD_LOGIN);
+	uint8_t buf[16];
+	get_rand_bytes(buf, sizeof(buf));
+	send_raw(buf, sizeof(buf), RAW_HDR_CMD_LOGIN);
 }
 
 static void
 send_codec_switch(uint8_t bits)
 {
-	send_packet('s', &bits, 1);
+	send_packet('s', &bits, 1, 12);
 }
 
 static void
@@ -1609,7 +1631,7 @@ send_server_options(int lazy, int compression, char denc)
 	//	}
 
 
-	send_packet('o', &optflags, 1);
+	send_packet('o', &optflags, 1, 12);
 }
 
 /* takes server challenge (16 bytes) as argument */
@@ -1649,7 +1671,7 @@ handshake_version(uint8_t *sc)
 				this.userid_char = hex[this.userid & 15];
 				this.userid_char2 = hex2[this.userid & 15];
 
-				DEBUG(2, "Login: sc=0x%016llx%016llx, cmc_up=%08x, cmc_dn=%08x",
+				DEBUG(2, "Login: sc=0x%016llx%016llx, cmc_up=%u, cmc_dn=%u",
 						*(uint64_t*)sc, *(uint64_t*)(sc+8), this.cmc_up, this.cmc_down);
 
 				fprintf(stderr, "Version ok, both using protocol v 0x%08x. You are user #%d\n",
@@ -1677,8 +1699,8 @@ handshake_version(uint8_t *sc)
 static int
 handshake_login(uint8_t *sc)
 {
-	uint8_t in[40], clogin[16], slogin[16], cc[16];
-	uint8_t server[16], client[16], netmask;
+	uint8_t in[40], clogin[16], slogin[16], cc[16], netmask;
+	char server[16], client[16];
 	uint16_t mtu;
 	int read, numwaiting = 0;
 	struct in_addr ip;
@@ -1702,7 +1724,7 @@ handshake_login(uint8_t *sc)
 			if (memcmp(in + 11, slogin, 16) != 0) {
 				DEBUG(1, "hash mismatch! server: 0x%016llx%016llx, actual: 0x%016llx%016llx",
 						*(uint64_t*)(in+11), *(uint64_t*)(in+19),
-						*(uint64_t*)slogin, *(uint64_t*)(slogin+8))
+						*(uint64_t*)slogin, *(uint64_t*)(slogin+8));
 				fprintf(stderr, "Server authentication failed: hash mismatch! Trying again...\n");
 				continue;
 			}
@@ -1714,6 +1736,11 @@ handshake_login(uint8_t *sc)
 			strncpy(client, inet_ntoa(ip), sizeof(client));
 			mtu = ntohs(*(uint16_t *) (in + 8));
 			netmask = in[10];
+
+			/* Login is now completed, now we can generate HMAC key */
+			hmac_key_calculate(this.hmac_key, sc, 16, cc, 16, this.passwordmd5);
+			memset(sc, 0, 16);
+			memset(cc, 0, 16);
 
 			if (tun_setip(client, server, netmask) == 0 && tun_setmtu(mtu) == 0) {
 				fprintf(stderr, "Server tunnel IP/netmask is %s/%hhu, our IP is %s\n",
@@ -2308,7 +2335,7 @@ handshake_switch_codec(int bits)
 			this.dataenc = tempenc;
 
 			/* Update outgoing buffer max (decoded) fragsize */
-			this.maxfragsize_up = get_raw_length_from_dns(this.hostname_maxlen - UPSTREAM_HDR, this.dataenc, this.topdomain);
+			this.maxfragsize_up = get_raw_length_from_dns(this.hostname_maxlen - UPSTREAM_DATA_HDR, this.dataenc, this.topdomain);
 			return;
 		}
 
@@ -2644,9 +2671,6 @@ client_handshake()
 		this.max_timeout_ms = 10000;
 		this.compression_down = 1;
 		this.compression_up = 1;
-		if (this.use_remote_forward)
-			fprintf(stderr, "Warning: Remote TCP forwards over Raw (UDP) mode may be unreliable.\n"
-				"         If forwarded connections are unstable, try using '-r' to force DNS tunnelling mode.\n");
 	} else {
 		if (this.raw_mode == 0) {
 			fprintf(stderr, "Skipping raw mode\n");
@@ -2688,19 +2712,19 @@ client_handshake()
 			return -1;
 
 		if (this.autodetect_frag_size) {
-			this.max_downstream_frag_size = handshake_autoprobe_fragsize();
-			if (this.max_downstream_frag_size > MAX_FRAGSIZE) {
+			this.maxfragsize_down = handshake_autoprobe_fragsize();
+			if (this.maxfragsize_down > MAX_FRAGSIZE) {
 				/* This is very unlikely except perhaps over LAN */
 				fprintf(stderr, "Can transfer fragsize of %d, however iodine has been compiled with MAX_FRAGSIZE = %d."
-					" To fully utilize this connection, please recompile iodine/iodined.\n", this.max_downstream_frag_size, MAX_FRAGSIZE);
-				this.max_downstream_frag_size = MAX_FRAGSIZE;
+					" To fully utilize this connection, please recompile iodine/iodined.\n", this.maxfragsize_down, MAX_FRAGSIZE);
+				this.maxfragsize_down = MAX_FRAGSIZE;
 			}
-			if (!this.max_downstream_frag_size) {
+			if (!this.maxfragsize_down) {
 				return 1;
 			}
 		}
 
-		handshake_set_fragsize(this.max_downstream_frag_size);
+		handshake_set_fragsize(this.maxfragsize_down);
 		if (!this.running)
 			return -1;
 
