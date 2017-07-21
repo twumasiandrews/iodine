@@ -38,11 +38,12 @@ sbin_PROGRAMS = iodine iodined
 iodine_CFLAGS = $(AM_CFLAGS)
 iodined_CFLAGS = $(AM_CFLAGS)
 
-COMMONSRC0 = src/base32.c src/base64.c src/common.c src/dns.c	\
- src/encoding.c src/auth.c src/md5.c src/read.c src/window.c	\
- src/util.c src/hmac_md5.c
+COMMONSRC0 = src/base32.c src/base64.c src/base128.c src/base64u.c \
+ src/common.c src/dns.c src/util.c src/hmac_md5.c \
+ src/encoding.c src/auth.c src/md5.c src/read.c src/window.c
 
-COMMONSRC = $(COMMONSRC0) src/base128.c src/tun.c src/base64u.c	\
+
+COMMONSRC = $(COMMONSRC0)  src/tun.c 	\
  src/base64u.h src/android_dns.h src/base128.h src/base32.h	\
  src/base64.h src/common.h src/dns.h src/encoding.h src/auth.h.h	\
  src/md5.h src/read.h src/tun.h src/version.h src/windows.h	\
