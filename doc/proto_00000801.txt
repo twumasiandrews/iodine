@@ -45,6 +45,9 @@ CMC = Cache Miss Counter, increased every time it is used
 1.2 Unauthenticated packets (pre-login)
 ---------------------------------------
 
+Note: These packets are backwards-compatible with previous versions of iodine,
+at least to protocol version 00000402.
+
 Upstream codec check / bounce:
 Client sends:
 	First byte z or Z
@@ -56,10 +59,9 @@ Server replies:
 Downstream codec check:
 Client sends:
 	First byte y or Y
-	rest in base32:
-	1 byte codec ID (see 
-	4 bytes random CMC
-	
+	1 char, meaning downstream codec to use
+	5 bits coded as Base32 char, meaning check variant
+	CMC as 3 Base32 chars
 	Possibly extra data, depending on check variant
 Server sends:
 	Data encoded with requested downstream codec; data content depending
@@ -103,9 +105,9 @@ Client sends (length 2+36):
 	First byte l or L
 	1 byte userid char (hex)
 	Rest encoded with base32:
+	4 bytes CMC
 	16 bytes hash of password + server login challenge
 	16 bytes client login challenge
-	4 bytes CMC
 Server replies (length 31):
 	BADAUTH if bad login
 	4 bytes server IPv4 address (network byte order)
@@ -113,7 +115,6 @@ Server replies (length 31):
 	2 bytes MTU (network byte order)
 	1 byte netmask bits (like CIDR)
 	16 bytes hash of password + client login challenge
-	4 bytes CMC
 If the requested UDP forwarding options are not accepted by the server, the
 response is simply LNAK.
 
@@ -134,7 +135,7 @@ The login process is outlined as follows:
 ------------------------------------------------
 
 IP Request: (for where to try raw login)
-Client sends:
+Client sends (2+16):
 	First byte i or I
 	1 byte userid char (hex)
 	Rest encoded in base32:
@@ -147,7 +148,7 @@ Server replies:
 	as 4 bytes (IPv4) or 16 bytes (IPv6)
 
 Switch upstream codec:
-Client sends:
+Client sends (2+16+1):
 	First byte s or S
 	1 byte userid char (hex)
 	rest encoded in base32:
@@ -162,7 +163,7 @@ Server sends:
 		must be encoded with the new codec.)
 
 Set Options:
-Client sends:
+Client sends (len 2+16+(1-19)):
 	First byte o or O
 	1 byte userid char (hex)
 	rest encoded in base32:
@@ -203,7 +204,7 @@ Option flags:
 
 
 Probe downstream fragment size:
-Client sends:
+Client sends (len 2+16+2+data):
 	First byte r or R
 	1 byte userid char (hex)
 	Rest encoded as base32:
@@ -221,7 +222,7 @@ Server sends:
 	This is checked by the client to determine corruption.
 
 Set downstream fragment size:
-Client sends:
+Client sends (len 2+16+2):
 	First byte n or N
 	1 byte userid char (hex)
 	Rest encoded with base32:
@@ -237,7 +238,7 @@ Server sends:
 1.5 Data packets and pings
 --------------------------
 
-Upstream data:
+Upstream data (len 1+8+2+data):
 	1 char ASCII hex coded user ID
 	rest encoded with chosen upstream codec (default base32):
     4 bytes CMC
@@ -249,7 +250,7 @@ Upstream data:
     +--------+
     1 byte packet sequence ID
 
-Downstream data header:
+Downstream data header (len 2+data):
 	1 byte sequence ID
 	1 byte flags
 	                  |=> only if ping (P) flag set       |
@@ -268,19 +269,19 @@ Flags and fields:
 	I = responded to immediately (for RTT calculation) - downstream only
 	Up/Dn Wsize/Wstart = upstream/downstream window size/window start Seq ID 
 
-Downstream data starts with 3 byte header, followed by data, which may be
+Downstream data starts with 2 byte header, followed by data, which may be
 compressed. If Ping flag is set, another 4 bytes are appended to the header,
 containing upstream and downstream window sizes and window start sequence IDs.
 The response does not need to contain data. If the server has no data to send,
 the response will always include the ping header and the ping flag will be set.
 
 Ping:
-Client sends:
+Client sends (len 2+16+9):
 	First byte p or P
 	1 byte userid char (hex)
+	Rest encoded with Base32:
     4 bytes CMC
     12 bytes HMAC
-	Rest encoded with Base32:
     0.......7 12
     +--------+76543210+
     |WWWWSSDD|000WT00R|
@@ -295,8 +296,6 @@ Client sends:
 		W = update window frag timeout
 		T = update server timeout
 		R = response must contain ping header (data optional)
-	4 bytes CMC
-	12 bytes HMAC
 Server replies with a (possibly empty) data packet with the ping (P) flag set.
 	If R (respond) bit is set, the server responds immediately with a data+ping packet.
 	The server must also adjust its window sizes to those provided by the client.
@@ -345,17 +344,18 @@ increasing priority sequence 10, 20, 30, etc. without gaps. Note that some DNS
 relays will shuffle the answer records in the response.
 
 Codec field values:
-	0x0: base32   (a-z0-5)
+	0x2: base32   (a-z0-5)
 	0x1: base64   (a-zA-Z0-9+-)
-	0x2: base64u  (a-zA-Z0-9_-)
-	0x3: base128  (a-zA-Z0-9\274-\375)
-	0x4: raw      (\000-\377)
+	0x3: base64u  (a-zA-Z0-9_-)
+	0x4: base128  (a-zA-Z0-9\274-\375)
+	0x0: raw      (\000-\377)
 Error codes:
 	0x0: BADLEN (packet below minimum length, maybe truncated)
 	0x1: BADHMAC (HMAC does not match, packet was rejected)
 	0x2: BADUSER (user session has timed out)
 	0x3: BADCODEC (codec not accepted by server)
 	0x4: BADFRAG (frag len not accepted by server)
+	0x5: BADLOGIN (LNAK: login not accepted)
 
 Protocol security
 =================
@@ -377,19 +377,23 @@ according to RFC 2104. The key is calculated according to the following process:
 	5. Append result from (3) to result from (4) and pad with 0x2C to 64 bytes
 	6. Bitwise XOR result from (5) with 0xB5
 	7. Calculate the MD5 hash of the result from (6), this is the key for the HMAC.
-The HMAC is applied to the raw data (before encoding or after decoding), and to
-to ensure that the entire packet (including user char and command) is signed it
-is necessary to include the command and userid somehow. Process is as follows:
-	1. The packet is prepared (assembled in case of sending, decoded to the point
-		where the HMAC field is available in case of receiving).
-	2. The HMAC field is set to 0 (since it is included in the data to be signed,
-		but at the same time cannot sign itself).
-	3. The userid byte is XORed with the first byte of the decoded data.
-	4. The command byte (if present) is XORed with the 2nd byte of decoded data.
-	5. The HMAC is calculated using the decoded data and decoded data length.
-	6. Receiving: the calculated HMAC is compared to the value in the original packet.
-		Sending: the calculated HMAC is inserted into the HMAC field, and the raw
-		data is encoded as necessary.
+
+The HMAC is calculated as follows for queries:
+	1. Packet data and header is assembled (data is not encoded yet).
+	2. HMAC field is set to 0.
+	3. Data to be encoded is appended to string (ie. cmd + userid chars) at
+		beginning of query name.
+	4. Length (32 bits, network byte order) is prepended to the result from (3)
+		Length = (len of chars at start of query) + (len of raw data) 
+	5. HMAC is calculated using the output from (4) and inserted into the HMAC
+		field in the data header. The data is then encoded (ie. base32 + dots)
+		and the query is sent.
+
+HMAC for responses is calculated following mostly the same procedure with the
+following notes:
+	- Data includes only that to be encoded in the DNS answer section
+	- In step (3) the data to be encoded is appended to the 1-char (b32)
+		downstream header.
 It should be noted that the codec used is not signed by the HMAC. This would mean
 that if the data was intercepted and reencoded differently in such a way that
 iodine was still able to decode it, the HMAC would still be valid.
@@ -458,7 +462,7 @@ arrive on the tun device, and are processed immediately on the other side.
 All Raw UDP protcol messages start with a fixed-length 20-byte header.
 This is not the start of a valid DNS message so it is easy to identify.
 
-Raw UDP Header:
+Raw UDP Header (len=20):
 	3 bytes magic:  0x10d19e
 	1 byte command (4-bits C) and user id (4-bits U):
 		 7654 3210
@@ -469,9 +473,10 @@ Raw UDP Header:
 	12 bytes HMAC
 
 Login message (command = 1):
+	16 bytes random data
 	This message can only be sent after the full DNS-based login sequence has been
 	completed successfully. The client enters raw mode by sending this message,
-	which must be signed using the client's 96-bit HMAC. 
+	which must be signed using the client's 96-bit HMAC.
 	After the login message has been exchanged, both the server and the client
 	switch to raw udp mode for the rest of the connection.
 
