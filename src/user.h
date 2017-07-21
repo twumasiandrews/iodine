@@ -26,6 +26,7 @@
 
 struct tun_user {
 	uint8_t server_chall[16];
+	uint8_t hmac_key[16];
 	struct timeval dns_timeout;
 	struct sockaddr_storage host;
 	struct sockaddr_storage remoteforward_addr;
@@ -44,9 +45,10 @@ struct tun_user {
 	int remote_forward_connected; /* 0 if not connected, -1 if error or 1 if OK */
 	int next_upstream_ack;
 	enum connection conn;
+	char use_hmac;
 	char lazy;
 	char id;
-	char downenc;
+	uint8_t downenc;
 	char downenc_bits;
 	char down_compression;
 	char active;
@@ -60,15 +62,12 @@ extern int created_users;
 int user_sending(int user);
 int all_users_waiting_to_send();
 int user_active(int i);
-int check_authenticated_user_and_ip(int userid, struct query *q, int check_ip);
-int check_user_and_ip(int userid, struct query *q, int check_ip);
+int is_valid_user(int userid);
 
 int init_users(in_addr_t, int);
 const char* users_get_first_ip();
 int find_user_by_ip(uint32_t);
 int find_available_user();
-void user_switch_codec(int userid, struct encoder *enc);
-void user_set_conn_type(int userid, enum connection c);
 int set_user_tcp_fds(fd_set *fds, int);
 
 #endif

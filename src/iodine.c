@@ -101,7 +101,7 @@ static struct client_instance preset_default = {
 	.autodetect_server_timeout = 1,
 	.dataenc = &base32_encoder,
 	.autodetect_frag_size = 1,
-	.max_downstream_frag_size = MAX_FRAGSIZE,
+	.maxfragsize_down = MAX_FRAGSIZE,
 	.compression_up = 1,
 	.compression_down = 1,
 	.windowsize_up = 8,
@@ -125,7 +125,7 @@ static struct client_instance preset_original = {
 	.downstream_timeout_ms = 4000,
 	.dataenc = &base32_encoder,
 	.autodetect_frag_size = 1,
-	.max_downstream_frag_size = MAX_FRAGSIZE,
+	.maxfragsize_down = MAX_FRAGSIZE,
 	.compression_down = 1,
 	.compression_up = 0,
 	.downenc = ' ',
@@ -143,7 +143,7 @@ static struct client_instance preset_fast = {
 	.autodetect_server_timeout = 1,
 	.dataenc = &base32_encoder,
 	.autodetect_frag_size = 1,
-	.max_downstream_frag_size = 1176,
+	.maxfragsize_down = 1176,
 	.compression_up = 1,
 	.compression_down = 1,
 	.windowsize_up = 30,
@@ -164,7 +164,7 @@ static struct client_instance preset_fallback = {
 	.autodetect_server_timeout = 1,
 	.dataenc = &base32_encoder,
 	.autodetect_frag_size = 1,
-	.max_downstream_frag_size = 500,
+	.maxfragsize_down = 500,
 	.compression_up = 1,
 	.compression_down = 1,
 	.windowsize_up = 1,
@@ -389,6 +389,7 @@ main(int argc, char **argv)
 	char *password = NULL;
 
 	int remote_forward_port = 0;
+	int foreground = 0;
 
 	char *nameserv_host = NULL;
 	struct sockaddr_storage nameservaddr;
@@ -493,7 +494,7 @@ main(int argc, char **argv)
 				this.stats = 0;
 			break;
 		case 'f':
-			this.foreground = 1;
+			foreground = 1;
 			break;
 		case 'D':
 			this.debug++;
@@ -535,7 +536,7 @@ main(int argc, char **argv)
 			break;
 		case 'm':
 			this.autodetect_frag_size = 0;
-			this.max_downstream_frag_size = atoi(optarg);
+			this.maxfragsize_down = atoi(optarg);
 			break;
 		case 'M':
 			this.hostname_maxlen = atoi(optarg);
@@ -617,7 +618,7 @@ main(int argc, char **argv)
 
 	srand((unsigned) time(NULL));
 	this.rand_seed = (uint16_t) rand();
-	this.chunkid = (uint16_t) rand();
+	this.lastid = (uint16_t) rand();
 	this.running = 1;
 
 	check_superuser(usage);
@@ -628,7 +629,7 @@ main(int argc, char **argv)
 	if (this.debug) {
 		fprintf(stderr, "Debug level %d enabled, will stay in foreground.\n", this.debug);
 		fprintf(stderr, "Add more -D switches to set higher debug level.\n");
-		this.foreground = 1;
+		foreground = 1;
 	}
 
 
@@ -673,7 +674,7 @@ main(int argc, char **argv)
 		usage();
 	}
 
-	if (this.max_downstream_frag_size < 10 || this.max_downstream_frag_size > MAX_FRAGSIZE) {
+	if (this.maxfragsize_down < 10 || this.maxfragsize_down > MAX_FRAGSIZE) {
 		warnx("Use a max frag size between 10 and %d bytes.", MAX_FRAGSIZE);
 		usage();
 		/* NOTREACHED */
@@ -789,7 +790,7 @@ main(int argc, char **argv)
 
 	fprintf(stderr, "Connection setup complete, transmitting data.\n");
 
-	if (this.foreground == 0)
+	if (foreground == 0)
 		do_detach();
 
 	if (pidfile != NULL)

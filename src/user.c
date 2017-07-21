@@ -44,7 +44,6 @@ struct tun_user *users;
 unsigned usercount;
 int created_users;
 
-
 int
 init_users(in_addr_t my_ip, int netbits)
 {
@@ -166,78 +165,42 @@ find_available_user()
 	return -1;
 }
 
-void
-user_switch_codec(int userid, struct encoder *enc)
+int
+is_valid_user(int userid)
+/* checks if userid given points to a user with valid data */
 {
-	if (userid < 0 || userid >= usercount)
-		return;
-
-	users[userid].encoder = enc;
-}
-
-void
-user_set_conn_type(int userid, enum connection c)
-{
-	if (userid < 0 || userid >= usercount)
-		return;
-
-	if (c < CONN_RAW_UDP || c >= CONN_MAX)
-		return;
-
-	users[userid].conn = c;
+	if (userid < 0 || userid >= created_users ) {
+		return 1;
+	}
+	return user_active(userid);
 }
 
 /* This will not check that user has passed login challenge */
 int
-check_user_and_ip(int userid, struct query *q, int check_ip)
+check_user_ip(int userid, struct sockaddr_storage from, socklen_t fromlen)
 {
-	/* Note: duplicate in handle_raw_login() except IP-address check */
+	struct tun_user *u = &users[userid];
 
-	if (userid < 0 || userid >= created_users ) {
-		return 1;
-	}
-	if (!user_active(userid)) return 1;
-
-	/* return early if IP checking is disabled */
-	if (!check_ip) {
+	if (from.ss_family != u->host.ss_family) {
 		return 0;
 	}
-
-	if (q->from.ss_family != users[userid].host.ss_family) {
-		return 1;
-	}
 	/* Check IPv4 */
-	if (q->from.ss_family == AF_INET) {
+	if (from.ss_family == AF_INET) {
 		struct sockaddr_in *expected, *received;
 
-		expected = (struct sockaddr_in *) &(users[userid].host);
-		received = (struct sockaddr_in *) &(q->from);
-		return memcmp(&(expected->sin_addr), &(received->sin_addr), sizeof(struct in_addr));
+		expected = (struct sockaddr_in *) &u->host;
+		received = (struct sockaddr_in *) &from;
+		return memcmp(&expected->sin_addr, &(received->sin_addr), sizeof(struct in_addr)) == 0;
 	}
 	/* Check IPv6 */
-	if (q->from.ss_family == AF_INET6) {
+	if (from.ss_family == AF_INET6) {
 		struct sockaddr_in6 *expected, *received;
 
-		expected = (struct sockaddr_in6 *) &(users[userid].host);
-		received = (struct sockaddr_in6 *) &(q->from);
-		return memcmp(&(expected->sin6_addr), &(received->sin6_addr), sizeof(struct in6_addr));
+		expected = (struct sockaddr_in6 *) &u->host;
+		received = (struct sockaddr_in6 *) &from;
+		return memcmp(&expected->sin6_addr, &received->sin6_addr, sizeof(struct in6_addr)) == 0;
 	}
 	/* Unknown address family */
-	return 1;
-}
-
-int
-check_authenticated_user_and_ip(int userid, struct query *q, int check_ip)
-/* This checks that user has passed normal (non-raw) login challenge
- * Returns 0 on success, 1 if user is not authenticated/IP is wrong */
-{
-	int res = check_user_and_ip(userid, q, check_ip);
-	if (res)
-		return res;
-
-	if (!(users[userid].authenticated >= 1))
-		return 1;
-
 	return 0;
 }
 
