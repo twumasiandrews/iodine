@@ -51,6 +51,8 @@
 #include "util.h"
 #include "server.h"
 #include "window.h"
+#include "md5.h"
+#include "hmac_md5.h"
 
 #ifdef HAVE_SYSTEMD
 # include <systemd/sd-daemon.h>
@@ -132,7 +134,7 @@ qmem_is_cached(int dns_fd, int userid, struct query *q)
 	struct qmem_buffer *buf;
 	struct query *pq;
 	char *data = "x";
-	char dataenc = 'T';
+	uint8_t dataenc = C_BASE32;
 	size_t len = 1;
 	int dnscache = 0;
 	buf = &users[userid].qmem;
@@ -162,7 +164,8 @@ qmem_is_cached(int dns_fd, int userid, struct query *q)
 
 		QMEM_DEBUG(2, userid, "OUT from qmem for '%s', %s", q->name,
 				dnscache ? "answer from DNS cache" : "sending invalid response");
-		write_dns(dns_fd, q, data, len, dataenc);
+		// TODO fix QMEM cached responses
+		write_dns(dns_fd, q, userid, data, len, dataenc | DH_HMAC32);
 		return 1;
 	}
 	return 0;
@@ -434,7 +437,7 @@ send_version_response(int fd, version_ack_t ack, uint32_t payload, int userid, s
 	memcpy(out, s, 4);
 	*(uint32_t *) (out + 4) = htonl(payload);
 
-	write_dns(fd, q, out, len, 'T');
+	write_dns(fd, q, -1, out, len, C_BASE32);
 }
 
 void
@@ -447,14 +450,15 @@ send_data_or_ping(int userid, struct query *q, int ping, int immediate, char *tc
 	size_t datalen, headerlen;
 	fragment *f = NULL;
 	struct frag_buffer *out, *in;
+	struct tun_user *u = &users[userid];
 
-	in = users[userid].incoming;
-	out = users[userid].outgoing;
+	in = u->incoming;
+	out = u->outgoing;
 
 	uint8_t pkt[out->maxfraglen + DOWNSTREAM_PING_HDR];
 
 	if (!tcperror) {
-		f = window_get_next_sending_fragment(out, &users[userid].next_upstream_ack);
+		f = window_get_next_sending_fragment(out, &u->next_upstream_ack);
 	} else {
 		/* construct fake fragment containing error message. */
 		fragment fr;
@@ -475,15 +479,15 @@ send_data_or_ping(int userid, struct query *q, int ping, int immediate, char *tc
 		ping = 1;
 		datalen = 0;
 		pkt[0] = 0; /* Pings don't need seq IDs unless they have data */
-		pkt[1] = users[userid].next_upstream_ack & 0xFF;
-		pkt[2] = (users[userid].next_upstream_ack < 0 ? 0 : 1) << 3;
-		users[userid].next_upstream_ack = -1;
+		pkt[1] = u->next_upstream_ack & 0xFF;
+		pkt[2] = (u->next_upstream_ack < 0 ? 0 : 1) << 3;
+		u->next_upstream_ack = -1;
 	} else {
 		datalen = f->len;
 		pkt[0] = f->seqID & 0xFF;
 		pkt[1] = f->ack_other & 0xFF;
 		pkt[2] = ((f->ack_other < 0 ? 0 : 1) << 3) | ((f->compressed & 1) << 2) | (f->start << 1) | f->end;
-		headerlen = DOWNSTREAM_HDR;
+		headerlen = DOWNSTREAM_DATA_HDR;
 	}
 
 	/* If this is being responded to immediately (ie. not from qmem)
@@ -511,8 +515,8 @@ send_data_or_ping(int userid, struct query *q, int ping, int immediate, char *tc
 		memcpy(pkt + headerlen, f->data, datalen);
 	}
 
-	write_dns(get_dns_fd(&server.dns_fds, &q->from), q, (char *)pkt,
-			  datalen + headerlen, users[userid].downenc);
+	write_dns(get_dns_fd(&server.dns_fds, &q->from), q, userid, pkt,
+			  datalen + headerlen, u->downenc | DH_HMAC32);
 
 	/* mark query as answered */
 	qmem_answered(userid, pkt, datalen + headerlen);
@@ -931,48 +935,33 @@ handle_full_packet(int userid, uint8_t *data, size_t len, int compressed)
 static void
 handle_raw_login(uint8_t *packet, size_t len, struct query *q, int fd, int userid)
 {
-	char myhash[16];
-
 	if (len < 16) {
 		DEBUG(2, "Invalid raw login packet: length %" L "u < 16 bytes!", len);
 		return;
 	}
 
-	if (userid < 0 || userid >= created_users ||
-		check_authenticated_user_and_ip(userid, q, server.check_ip) != 0) {
-		DEBUG(2, "User %d not authenticated, ignoring raw login!", userid);
-		return;
-	}
-
 	DEBUG(1, "RX-raw: login, len %" L "u, from user %d", len, userid);
 
-	/* User sends hash of seed + 1 */
-	//login_calculate(myhash, 16, server.passwordmd5, users[userid].seed + 1);
-	if (memcmp(packet, myhash, 16) == 0) {
-		/* Update time info for user */
-		users[userid].last_pkt = time(NULL);
+	/* User is authenticated using HMAC (already verified) */
+	/* Update time info for user */
+	users[userid].last_pkt = time(NULL);
 
-		/* Store remote IP number */
-		memcpy(&(users[userid].host), &(q->from), q->fromlen);
-		users[userid].hostlen = q->fromlen;
+	/* Store remote IP number */
+	memcpy(&(users[userid].host), &(q->from), q->fromlen);
+	users[userid].hostlen = q->fromlen;
 
-		/* Correct hash, reply with hash of seed - 1 */
-		user_set_conn_type(userid, CONN_RAW_UDP);
-		//login_calculate(myhash, 16, server.passwordmd5, users[userid].seed - 1);
-		send_raw(fd, (uint8_t *)myhash, 16, userid, RAW_HDR_CMD_LOGIN, &q->from, q->fromlen);
+	users[userid].conn = CONN_RAW_UDP;
 
-		users[userid].authenticated_raw = 1;
-	}
+	uint8_t data[16];
+	get_rand_bytes(data, sizeof(data));
+	send_raw(fd, data, sizeof(data), userid, RAW_HDR_CMD_LOGIN, &q->from, q->fromlen);
+
+	users[userid].authenticated_raw = 1;
 }
 
 static void
 handle_raw_data(uint8_t *packet, size_t len, struct query *q, int userid)
 {
-	if (check_authenticated_user_and_ip(userid, q, server.check_ip) != 0) {
-		return;
-	}
-	if (!users[userid].authenticated_raw) return;
-
 	/* Update time info for user */
 	users[userid].last_pkt = time(NULL);
 
@@ -986,11 +975,6 @@ handle_raw_data(uint8_t *packet, size_t len, struct query *q, int userid)
 static void
 handle_raw_ping(struct query *q, int dns_fd, int userid)
 {
-	if (check_authenticated_user_and_ip(userid, q, server.check_ip) != 0) {
-		return;
-	}
-	if (!users[userid].authenticated_raw) return;
-
 	/* Update time info for user */
 	users[userid].last_pkt = time(NULL);
 
@@ -1003,8 +987,10 @@ handle_raw_ping(struct query *q, int dns_fd, int userid)
 static int
 raw_decode(uint8_t *packet, size_t len, struct query *q, int dns_fd)
 {
-	int raw_user;
+	uint8_t userid;
 	uint8_t raw_cmd;
+	uint8_t hmac_pkt[16], hmac[16];
+	uint32_t cmc;
 
 	/* minimum length */
 	if (len < RAW_HDR_LEN) return 0;
@@ -1013,29 +999,53 @@ raw_decode(uint8_t *packet, size_t len, struct query *q, int dns_fd)
 		return 0;
 
 	raw_cmd = RAW_HDR_GET_CMD(packet);
-	raw_user = RAW_HDR_GET_USR(packet);
+	userid = RAW_HDR_GET_USR(packet);
+	cmc = ntohl(*(uint32_t *) (packet + RAW_HDR_CMC));
+	memset(hmac_pkt, 0, sizeof(hmac_pkt));
+	memcpy(hmac_pkt, packet + RAW_HDR_HMAC, RAW_HDR_HMAC_LEN);
 
 	DEBUG(3, "RX-raw: client %s, user %d, raw command 0x%02X, length %" L "u",
-			  format_addr(&q->from, q->fromlen), raw_user, raw_cmd, len);
+			  format_addr(&q->from, q->fromlen), userid, raw_cmd, len);
+
+	if (!is_valid_user(userid)) {
+		DEBUG(2, "Drop raw pkt from invalid user %d", userid);
+		return 0;
+	}
+
+	struct tun_user *u = &users[userid];
 
 	packet += RAW_HDR_LEN;
 	len -= RAW_HDR_LEN;
-	switch (raw_cmd) {
-	case RAW_HDR_CMD_LOGIN:
-		/* Login challenge */
-		handle_raw_login(packet, len, q, dns_fd, raw_user);
-		break;
-	case RAW_HDR_CMD_DATA:
+
+	/* Verify HMAC */
+	memset(packet + RAW_HDR_HMAC, 0, RAW_HDR_HMAC_LEN);
+	hmac_md5(hmac, u->hmac_key, sizeof(u->hmac_key), packet, len);
+	if (memcmp(hmac, hmac_pkt, RAW_HDR_HMAC_LEN) != 0) {
+		DEBUG(3, "RX-raw: bad HMAC pkt=0x%016llx%016llx, actual=0x%016llx%016llx (%d)",
+				*(uint64_t*)hmac_pkt, *(uint64_t*)(hmac_pkt+8),
+				*(uint64_t*)hmac, *(uint64_t*)(hmac+8), RAW_HDR_HMAC_LEN);
+	}
+
+	if (raw_cmd == RAW_HDR_CMD_LOGIN) {
+		/* Raw login packet */
+		handle_raw_login(packet, len, q, dns_fd, userid);
+		return 1;
+	}
+
+	if (!users[userid].authenticated_raw) {
+		DEBUG(2, "Warning: Valid HMAC on RAW UDP packet from unauthenticated user!");
+		return 0;
+	}
+
+	if (raw_cmd == RAW_HDR_CMD_DATA) {
 		/* Data packet */
-		handle_raw_data(packet, len, q, raw_user);
-		break;
-	case RAW_HDR_CMD_PING:
+		handle_raw_data(packet, len, q, userid);
+	} else if (raw_cmd == RAW_HDR_CMD_PING) {
 		/* Keepalive packet */
-		handle_raw_ping(q, dns_fd, raw_user);
-		break;
-	default:
-		DEBUG(1, "Unhandled raw command %02X from user %d", raw_cmd, raw_user);
-		break;
+		handle_raw_ping(q, dns_fd, userid);
+	} else {
+		DEBUG(1, "Unhandled raw command %02X from user %d", raw_cmd, userid);
+		return 0;
 	}
 	return 1;
 }
@@ -1122,115 +1132,105 @@ read_dns(int fd, struct query *q)
 	return 0;
 }
 
-static size_t
-write_dns_nameenc(uint8_t *buf, size_t buflen, uint8_t *data, size_t datalen, char downenc)
-/* Returns #bytes of data that were encoded */
+size_t
+downstream_encode(uint8_t *out, size_t outlen, uint8_t *data,
+		size_t datalen, int userid, uint8_t flags, int encode, int dots)
+/* Adds downstream header (flags+CMC+HMAC) to given data and encode
+ * returns #bytes that were encoded */
 {
-	static int td_cmc;
-	char td[3];
-	struct encoder *enc;
+	size_t hmaclen;
+	uint32_t len;
 
-	/* Make a rotating topdomain to prevent filtering, ie 10-bit CMC */
-	td_cmc ++;
-	td_cmc &= 0x3FF;
-
-	td[0] = b32_5to8(td_cmc & 0x1F);
-	td[1] = b32_5to8((td_cmc >> 5) & 0x1F);
-	td[2] = 0;
-
-	/* encode data,datalen to CNAME/MX answer */
-	if (downenc == 'S') {
-		buf[0] = 'i';
-		enc = b64;
-	} else if (downenc == 'U') {
-		buf[0] = 'j';
-		enc = b64u;
-	} else if (downenc == 'V') {
-		buf[0] = 'k';
-		enc = b128;
-	} else {
-		buf[0] = 'h';
-		enc = b32;
+	if (flags & DH_ERROR) {
+		if (flags & DH_HMAC32) {
+			/* always 96-bit HMAC when error flag is set */
+			flags ^= DH_HMAC32;
+		}
+	}
+	hmaclen = flags & DH_HMAC32 ? 4 : 12;
+	if (outlen < 5 + hmaclen + datalen) {
+		return 0;
 	}
 
-	return build_hostname(buf, buflen, data, datalen, td, enc, 0xFF, 1);
+	/* construct downstream data header
+	 * 4 bytes CMC (network byte order) (random for pre-login responses)
+	 * 4 or 12 bytes HMAC (note: HMAC field is 32-bits random for all pre-login responses)
+	 * for HMAC calculation (in hmacbuf): length + flags + CMC + hmac + data */
+	len = 4 + 1 + 4 + hmaclen + datalen;
+	uint8_t hmac[16], hmacbuf[len];
+
+	*(uint32_t *) hmacbuf = htonl(len);
+	out[0] = hmacbuf[4] = b32_5to8(flags);
+	*(uint32_t *) (hmacbuf + 5) = htonl(CMC(users[userid].cmc_down));
+	memcpy(hmacbuf + 9 + hmaclen, data, datalen);
+
+	memset(hmacbuf + 9, 0, hmaclen);
+	hmac_md5(hmac, users[userid].hmac_key, 16, hmacbuf, len);
+	memcpy(hmacbuf + 9, hmac, hmaclen);
+
+	if (encode) {
+		/* now encode data from hmacbuf (not including flags and length, +0 terminator) */
+		return encode_data(out + 1, outlen - 2, hmacbuf + 5, len - 5, flags & 7, dots);
+	} else {
+		memcpy(out, hmacbuf + 5, len - 5);
+		return len;
+	}
 }
 
+#define WD_AUTO (1 << 5)
+#define WD_OLD	(1 << 6)
+
 void
-write_dns(int fd, struct query *q, char *data, size_t datalen, char downenc)
+write_dns(int fd, struct query *q, int userid, uint8_t *data, size_t datalen, uint8_t flags)
 {
-	char buf[64*1024];
-	int len = 0;
+	uint8_t buf[64*1024], tmpbuf[64*1024];
+	size_t len = 0;
+	if (data == NULL) {
+		datalen = 0;
+		data = buf;
+	}
+	if ((flags & WD_AUTO) && userid >= 0) {
+		flags = users[userid].downenc;
+	}
 
-	if (q->type == T_CNAME || q->type == T_A ||
-		q->type == T_PTR || q->type == T_AAAA || q->type == T_A6 || q->type == T_DNAME) {
-		char cnamebuf[1024];		/* max 255 */
+	if (q->type == T_CNAME || q->type == T_A || q->type == T_PTR ||
+			q->type == T_AAAA || q->type == T_A6 || q->type == T_DNAME) {
+		/* encode data with DNS dots, max len 255 */
+		downstream_encode(tmpbuf, sizeof(tmpbuf), data, datalen, userid, flags, 1, 1);
 
-		write_dns_nameenc((uint8_t *)cnamebuf, sizeof(cnamebuf), (uint8_t *)data, datalen, downenc);
-
-		len = dns_encode(buf, sizeof(buf), q, QR_ANSWER, cnamebuf, sizeof(cnamebuf));
+		len = dns_encode(buf, sizeof(buf), q, QR_ANSWER, tmpbuf, sizeof(tmpbuf));
 	} else if (q->type == T_MX || q->type == T_SRV) {
-		char mxbuf[64*1024];
-		char *b = mxbuf;
-		int offset = 0;
-		int res;
-
+		uint8_t *b = tmpbuf + 1; /* skip flags byte */
+		size_t res, offset = 1;
+		/* add header to data but don't encode it yet */
+		len = downstream_encode(buf, sizeof(buf), data, datalen, userid, flags, 0, 0);
+		tmpbuf[0] = buf[0];
 		while (1) {
-			res = write_dns_nameenc((uint8_t *)b, sizeof(mxbuf) - (b - mxbuf),
-									(uint8_t *)data + offset, datalen - offset, downenc);
+			res = encode_data(b, sizeof(tmpbuf) - (b - tmpbuf), buf + offset,
+					len - offset, flags, 1);
 			if (res < 1) {
 				/* nothing encoded */
 				b++;	/* for final \0 */
 				break;
 			}
 
-			b = b + strlen(b) + 1;
-
+			b += strlen(b) + 1;
 			offset += res;
 			if (offset >= datalen)
 				break;
 		}
 
-		/* Add final \0 */
-		*b = '\0';
+		/* Add final \0 (dns_encode expects double \0\0 at end of last hostname) */
+		*b = 0;
 
-		len = dns_encode(buf, sizeof(buf), q, QR_ANSWER, mxbuf,
-				 sizeof(mxbuf));
-	} else if (q->type == T_TXT) {
-		/* TXT with base32 */
-		uint8_t txtbuf[64*1024];
-		size_t space = sizeof(txtbuf) - 1;;
-
-		memset(txtbuf, 0, sizeof(txtbuf));
-
-		if (downenc == 'S') {
-			txtbuf[0] = 's';	/* plain base64(Sixty-four) */
-			len = b64->encode(txtbuf+1, &space, (uint8_t *)data, datalen);
-		}
-		else if (downenc == 'U') {
-			txtbuf[0] = 'u';	/* Base64 with Underscore */
-			len = b64u->encode(txtbuf+1, &space, (uint8_t *)data, datalen);
-		}
-		else if (downenc == 'V') {
-			txtbuf[0] = 'v';	/* Base128 */
-			len = b128->encode(txtbuf+1, &space, (uint8_t *)data, datalen);
-		}
-		else if (downenc == 'R') {
-			txtbuf[0] = 'r';	/* Raw binary data */
-			len = MIN(datalen, sizeof(txtbuf) - 1);
-			memcpy(txtbuf + 1, data, len);
-		} else {
-			txtbuf[0] = 't';	/* plain base32(Thirty-two) */
-			len = b32->encode(txtbuf+1, &space, (uint8_t *)data, datalen);
-		}
-		len = dns_encode(buf, sizeof(buf), q, QR_ANSWER, (char *)txtbuf, len+1);
-	} else {
-		/* Normal NULL-record encode */
-		len = dns_encode(buf, sizeof(buf), q, QR_ANSWER, data, datalen);
+		len = dns_encode(buf, sizeof(buf), q, QR_ANSWER, tmpbuf, sizeof(tmpbuf));
+	} else { /* TXT or NULL record encode */
+		len = downstream_encode(tmpbuf, sizeof(tmpbuf), data, datalen, userid, flags, 1, 0);
+		len = dns_encode(buf, sizeof(buf), q, QR_ANSWER, (char *)tmpbuf, len+1);
 	}
 
 	if (len < 1) {
-		warnx("dns_encode doesn't fit");
+		DEBUG(1, "dns_encode doesn't fit");
 		return;
 	}
 
@@ -1241,12 +1241,15 @@ write_dns(int fd, struct query *q, char *data, size_t datalen, char downenc)
 }
 
 // TODO send error codes
-#define CHECK_LEN(l, x) \
+#define CHECK_LEN_U(l, x, u) \
 	if (l != x) { \
 		DEBUG(3, "BADLEN: expected %u, got %u", x, l); \
-		write_dns(dns_fd, q, "BADLEN", 6, 'T'); \
+		write_dns(dns_fd, q, u, "BADLEN", 6, DH_ERR(BADLEN)); \
 		return; \
 	}
+
+#define CHECK_LEN_NOU(l, x) CHECK_LEN_U(l, x, -1)
+#define CHECK_LEN(l, x)		CHECK_LEN_U(l, x, userid)
 
 void
 handle_dns_version(int dns_fd, struct query *q, uint8_t *domain, int domain_len)
@@ -1336,108 +1339,29 @@ handle_dns_downstream_codec_check(int dns_fd, struct query *q, uint8_t *domain, 
 		datap = DOWNCODECCHECK1;
 		datalen = DOWNCODECCHECK1_LEN;
 	} else {
-		write_dns(dns_fd, q, "BADLEN", 6, 'T');
+		write_dns(dns_fd, q, -1, NULL, 0, DH_ERR(BADLEN));
 		return;
 	}
 
 	/* codec to test: first char raw */
-	codec = toupper(domain[1]);
-	switch (codec) {
-		case 'T':
-		case 'S':
-		case 'U':
-		case 'V':
-			if (q->type == T_TXT ||
-				q->type == T_SRV || q->type == T_MX ||
-				q->type == T_CNAME || q->type == T_A ||
-				q->type == T_PTR || q->type == T_AAAA ||
-				q->type == T_A6 || q->type == T_DNAME) {
-				write_dns(dns_fd, q, datap, datalen, codec);
-				return;
-			}
-			break;
-		case 'R':
-			if (q->type == T_NULL || q->type == T_TXT) {
-				write_dns(dns_fd, q, datap, datalen, 'R');
-				return;
-			}
-			break;
+	codec = C_CHAR2NUM(domain[1]);
+	if (q->type == T_TXT ||
+		q->type == T_SRV || q->type == T_MX ||
+		q->type == T_CNAME || q->type == T_A ||
+		q->type == T_PTR || q->type == T_AAAA ||
+		q->type == T_A6 || q->type == T_DNAME) {
+		write_dns(dns_fd, q, -1, datap, datalen, codec);
+		return;
+	}
+	if (q->type == T_NULL || q->type == T_TXT) {
+		write_dns(dns_fd, q, -1, datap, datalen, C_RAW);
+		return;
 	}
 
 	/* if still here, then codec not available */
-	write_dns(dns_fd, q, "BADCODEC", 8, 'T');
+	write_dns(dns_fd, q, -1, NULL, 0, DH_ERR(BADCODEC));
 }
 
-void
-handle_dns_login(int dns_fd, struct query *q, uint8_t *domain, int domain_len, int userid)
-{
-	uint8_t unpacked[512], flags;
-	uint8_t logindata[16], cc[16], out[31];
-	char fromaddr[100];
-	struct in_addr tempip;
-	int read;
-	struct tun_user *u = &users[userid];
-
-	read = unpack_data(unpacked, sizeof(unpacked), (uint8_t *) domain + 2, domain_len - 2, b32);
-
-	CHECK_LEN(read, 36);
-
-	strncpy(fromaddr, format_addr(&q->from, q->fromlen), 100);
-
-	if (check_user_and_ip(userid, q, server.check_ip) != 0) {
-		write_dns(dns_fd, q, "BADIP", 5, 'T');
-		syslog(LOG_WARNING, "rejected login request from user #%d from %s; expected source %s",
-			userid, fromaddr, format_addr(&u->host, u->hostlen));
-		DEBUG(1, "Rejected login request from user %d: BADIP", userid);
-		return;
-	}
-
-	u->last_pkt = time(NULL);
-	login_calculate(logindata, server.passwordmd5, u->server_chall);
-	memcpy(cc, unpacked + 16, 16);
-
-	DEBUG(2, "RX login U%d (%s): hash=0x%016llx%016llx, cc=0x%016llx%016llx",
-			  userid, fromaddr, *(uint64_t*)(unpacked), *(uint64_t*)(unpacked+8),
-			  *(uint64_t*)(cc), *(uint64_t*)(cc+8));
-
-	if (memcmp(logindata, unpacked, 16) != 0) {
-		write_dns(dns_fd, q, "LNAK", 4, 'T');
-		if (--u->authenticated >= 0)
-			u->authenticated = -1;
-		int tries = abs(u->authenticated);
-		DEBUG(1, "rejected login from user %d (%s), reason: bad hash, tries: %d",
-			  userid, fromaddr, tries);
-		syslog(LOG_WARNING, "rejected login from user #%d from %s; incorrect attempts: %d",
-			userid, fromaddr, tries);
-		return;
-	}
-
-	/* Store user auth OK, count number of logins */
-	if (++u->authenticated > 1) {
-		syslog(LOG_WARNING, "duplicate login request from user #%d from %s",
-			   userid, fromaddr);
-	}
-
-	/* calculate server-to-client authentication data */
-	login_calculate(logindata, server.passwordmd5, cc);
-
-	/* Send ip/mtu/netmask info */
-	*(uint32_t *) out = server.my_ip;
-	*(uint32_t *) (out + 4) = u->tun_ip;
-	*(uint16_t *) (out + 8) = htons(server.mtu);
-	out[10] = server.netmask;
-	memcpy(out + 11, logindata, 16);
-	*(uint32_t *) (out + 27) = htonl(CMC(u->cmc_down));
-
-	struct in_addr tunip;
-	tunip.s_addr = u->tun_ip;
-	char *s = inet_ntoa(tunip);
-	DEBUG(1, "User %d connected from %s, tun_ip %s, srv auth=0x%016llx%016llx",
-			userid, fromaddr, s, *(uint64_t*)logindata, *(uint64_t*)(logindata+8));
-	syslog(LOG_NOTICE, "accepted password from user #%d, given IP %s", userid, s);
-
-	write_dns(dns_fd, q, out, 31, u->downenc);
-}
 
 void
 handle_dns_ip_request(int dns_fd, struct query *q, int userid)
@@ -1461,7 +1385,7 @@ handle_dns_ip_request(int dns_fd, struct query *q, int userid)
 		length = 1 + sizeof(struct in6_addr);
 	}
 
-	write_dns(dns_fd, q, reply, length, 'T');
+	write_dns(dns_fd, q, userid, reply, length, WD_AUTO);
 }
 
 void
@@ -1471,33 +1395,17 @@ handle_dns_upstream_codec_switch(int dns_fd, struct query *q, int userid,
 	int codec;
 	struct encoder *enc;
 
-	codec = unpacked[0];
+	codec = unpacked[0] & 7;
 
-	switch (codec) {
-	case 5: /* 5 bits per byte = base32 */
-		enc = b32;
-		user_switch_codec(userid, enc);
-		write_dns(dns_fd, q, enc->name, strlen(enc->name), users[userid].downenc);
-		break;
-	case 6: /* 6 bits per byte = base64 */
-		enc = b64;
-		user_switch_codec(userid, enc);
-		write_dns(dns_fd, q, enc->name, strlen(enc->name), users[userid].downenc);
-		break;
-	case 26: /* "2nd" 6 bits per byte = base64u, with underscore */
-		enc = b64u;
-		user_switch_codec(userid, enc);
-		write_dns(dns_fd, q, enc->name, strlen(enc->name), users[userid].downenc);
-		break;
-	case 7: /* 7 bits per byte = base128 */
-		enc = b128;
-		user_switch_codec(userid, enc);
-		write_dns(dns_fd, q, enc->name, strlen(enc->name), users[userid].downenc);
-		break;
-	default:
-		write_dns(dns_fd, q, "BADCODEC", 8, users[userid].downenc);
-		break;
+	enc = get_encoder(codec);
+	if (enc == NULL && codec != CONN_RAW_UDP) {
+		write_dns(dns_fd, q, userid, NULL, 0, WD_AUTO);
+		return;
 	}
+	users[userid].encoder = enc;
+
+	write_dns(dns_fd, q, userid, enc->name, strlen(enc->name), WD_AUTO);
+
 }
 
 void
@@ -1612,7 +1520,7 @@ handle_dns_set_options(int dns_fd, struct query *q, int userid,
 		bits = 8;
 		break;
 	default: /* Invalid (More than 1 encoding bit set) */
-		write_dns(dns_fd, q, "BADCODEC", 8, users[userid].downenc);
+		write_dns(dns_fd, q, userid, NULL, 0, DH_ERR(BADCODEC));
 		return;
 	}
 
@@ -1640,7 +1548,7 @@ handle_dns_set_options(int dns_fd, struct query *q, int userid,
 	users[userid].downenc = tmp_downenc;
 	users[userid].lazy = tmp_lazy;
 
-	write_dns(dns_fd, q, encname, strlen(encname), users[userid].downenc);
+	write_dns(dns_fd, q, userid, encname, strlen(encname), WD_AUTO);
 }
 
 void
@@ -1648,26 +1556,25 @@ handle_dns_fragsize_probe(int dns_fd, struct query *q, int userid,
 						  uint8_t *unpacked, size_t read)
 /* Downstream fragsize probe packet */
 {
-	int req_frag_size;
+	uint16_t req_frag_size;
 
 	req_frag_size = ntohs(*(uint16_t *) unpacked);
 	DEBUG(3, "Got downstream fragsize probe from user %d, required fragsize %d", userid, req_frag_size);
 
 	if (req_frag_size < 2 || req_frag_size > MAX_FRAGSIZE) {
-		write_dns(dns_fd, q, "BADFRAG", 7, users[userid].downenc);
+		write_dns(dns_fd, q, userid, NULL, 0, DH_ERR(BADFRAG));
 	} else {
-		char buf[MAX_FRAGSIZE];
-		int i;
+		uint8_t buf[MAX_FRAGSIZE];
 		unsigned int v = ((unsigned int) rand()) & 0xff;
 
 		memset(buf, 0, sizeof(buf));
-		buf[0] = (req_frag_size >> 8) & 0xff;
-		buf[1] = req_frag_size & 0xff;
+		*(uint16_t *) buf = htons(req_frag_size);
 		/* make checkable pseudo-random sequence */
 		buf[2] = 107;
-		for (i = 3; i < MAX_FRAGSIZE; i++, v = (v + 107) & 0xff)
+		for (int i = 3; i < MAX_FRAGSIZE; i++, v = (v + 107) & 0xff) {
 			buf[i] = v;
-		write_dns(dns_fd, q, buf, req_frag_size, users[userid].downenc);
+		}
+		write_dns(dns_fd, q, userid, buf, req_frag_size, WD_AUTO);
 	}
 }
 
@@ -1680,12 +1587,12 @@ handle_dns_set_fragsize(int dns_fd, struct query *q, int userid,
 	max_frag_size = ntohs(*(uint16_t *)unpacked);
 
 	if (max_frag_size < 2 || max_frag_size > MAX_FRAGSIZE) {
-		write_dns(dns_fd, q, "BADFRAG", 7, users[userid].downenc);
+		write_dns(dns_fd, q, userid, NULL, 0, DH_ERR(BADFRAG));
 	} else {
 		users[userid].fragsize = max_frag_size;
 		window_buffer_resize(users[userid].outgoing, users[userid].outgoing->length,
 				(users[userid].downenc_bits * max_frag_size) / 8 - DOWNSTREAM_PING_HDR);
-		write_dns(dns_fd, q, (char *)unpacked, 2, users[userid].downenc);
+		write_dns(dns_fd, q, userid, unpacked, 2, WD_AUTO);
 
 		DEBUG(1, "Setting max downstream data length to %u bytes for user %d; %d bits (%c)",
 			  users[userid].outgoing->maxfraglen, userid, users[userid].downenc_bits, users[userid].downenc);
@@ -1772,14 +1679,12 @@ handle_dns_ping(int dns_fd, struct query *q, int userid,
 }
 
 void
-handle_dns_data(int dns_fd, struct query *q, uint8_t *domain, int domain_len, int userid)
+handle_dns_data(int dns_fd, struct query *q, uint8_t *unpacked, size_t len, int userid)
 {
-	uint8_t unpacked[20];
 	fragment f;
-	size_t len;
 
-	/* Need 6 char header + >=1 char data */
-	CHECK_LEN(domain_len, UPSTREAM_HDR + 1);
+	/* Need 2 byte header + >=1 byte data */
+	CHECK_LEN(len, UPSTREAM_DATA_HDR + 1);
 
 	/* Check if cached */
 	if (qmem_is_cached(dns_fd, userid, q)) {
@@ -1789,24 +1694,14 @@ handle_dns_data(int dns_fd, struct query *q, uint8_t *domain, int domain_len, in
 
 	qmem_append(userid, q);
 	/* Decode upstream data header - see docs/proto_XXXXXXXX.txt */
-	/* First byte (after userid) = CMC (ignored); skip 2 bytes */
-	len = sizeof(unpacked);
-	b32->decode(unpacked, &len, (uint8_t *)domain + 2, 5);
-
 	f.seqID = unpacked[0];
 	unpacked[2] >>= 4; /* Lower 4 bits are unused */
 	f.ack_other = ((unpacked[2] >> 3) & 1) ? unpacked[1] : -1;
 	f.compressed = (unpacked[2] >> 2) & 1;
 	f.start = (unpacked[2] >> 1) & 1;
 	f.end = unpacked[2] & 1;
-
-	uint8_t data[users[userid].incoming->maxfraglen];
-	f.data = data;
-
-	/* Decode remainder of data with user encoding into fragment */
-	f.len = unpack_data(f.data, users[userid].incoming->maxfraglen,
-				(uint8_t *)domain + UPSTREAM_HDR,
-				domain_len - UPSTREAM_HDR, users[userid].encoder);
+	f.len = len - UPSTREAM_DATA_HDR;
+	f.data = unpacked + UPSTREAM_DATA_HDR;
 
 	DEBUG(3, "frag seq %3u, datalen %5lu, ACK %3d, compression %1d, s%1d e%1d",
 				f.seqID, f.len, f.ack_other, f.compressed, f.start, f.end);
@@ -1827,12 +1722,87 @@ handle_dns_data(int dns_fd, struct query *q, uint8_t *domain, int domain_len, in
 }
 
 void
+handle_dns_login(int dns_fd, struct query *q, uint8_t *unpacked,
+		size_t len, int userid, uint32_t cmc)
+{
+	uint8_t flags, logindata[16], cc[16], out[27];
+	char fromaddr[100];
+	struct in_addr tempip;
+
+	CHECK_LEN(len, 36);
+
+	strncpy(fromaddr, format_addr(&q->from, q->fromlen), 100);
+
+	if (!is_valid_user(userid)) {
+		write_dns(dns_fd, q, userid, NULL, 0, DH_ERR(BADUSER));
+		syslog(LOG_WARNING, "rejected login request from user #%d from %s",
+			userid, fromaddr);
+		DEBUG(1, "Rejected login request from user %d (%s): BADUSER", userid, fromaddr);
+		return;
+	}
+
+	struct tun_user *u = &users[userid];
+	u->last_pkt = time(NULL);
+	login_calculate(logindata, server.passwordmd5, u->server_chall);
+	memcpy(cc, unpacked + 16, 16);
+
+	DEBUG(2, "RX login U%d (%s): hash=0x%016llx%016llx, cc=0x%016llx%016llx, cmc=%u",
+			  userid, fromaddr, *(uint64_t*)(unpacked), *(uint64_t*)(unpacked+8),
+			  *(uint64_t*)(cc), *(uint64_t*)(cc+8), cmc);
+
+	if (memcmp(logindata, unpacked, 16) != 0) {
+		write_dns(dns_fd, q, userid, NULL, 0, DH_ERR(BADLOGIN));
+		if (--u->authenticated >= 0)
+			u->authenticated = -1;
+		int tries = abs(u->authenticated);
+		DEBUG(1, "rejected login from user %d (%s), reason: bad hash, tries: %d",
+			  userid, fromaddr, tries);
+		syslog(LOG_WARNING, "rejected login from user #%d from %s; incorrect attempts: %d",
+			userid, fromaddr, tries);
+		return;
+	}
+
+	/* Store user auth OK, count number of logins */
+	if (++u->authenticated > 1) {
+		syslog(LOG_WARNING, "duplicate login request from user #%d from %s",
+			   userid, fromaddr);
+		DEBUG(1, "duplicate login request from user %d (%s)", userid, fromaddr);
+	}
+
+	/* calculate server-to-client authentication data */
+	login_calculate(logindata, server.passwordmd5, cc);
+
+	/* Send ip/mtu/netmask info */
+	*(uint32_t *) out = server.my_ip;
+	*(uint32_t *) (out + 4) = u->tun_ip;
+	*(uint16_t *) (out + 8) = htons(server.mtu);
+	out[10] = server.netmask;
+	memcpy(out + 11, logindata, 16);
+
+	struct in_addr tunip;
+	tunip.s_addr = u->tun_ip;
+	char *s = inet_ntoa(tunip);
+	DEBUG(1, "User %d connected from %s, tun_ip %s, srv auth=0x%016llx%016llx",
+			userid, fromaddr, s, *(uint64_t*)logindata, *(uint64_t*)(logindata+8));
+	syslog(LOG_NOTICE, "accepted password from user #%d, given IP %s", userid, s);
+
+	/* get HMAC key */
+	hmac_key_calculate(u->hmac_key, u->server_chall, 16, cc, 16, server.passwordmd5);
+
+	write_dns(dns_fd, q, userid, out, sizeof(out), WD_AUTO);
+}
+
+void
 handle_null_request(int dns_fd, struct query *q, int domain_len)
 /* Handles a NULL DNS request. See doc/proto_XXXXXXXX.txt for details on iodine protocol. */
 {
 	char cmd, userchar;
 	int userid = -1;
 	uint8_t in[QUERY_NAME_SIZE + 1];
+	uint8_t hmac[16], hmac_pkt[16];
+	size_t hmaclen = 12, headerlen = 2;
+	uint32_t cmc;
+	struct encoder *enc = b32;
 
 	/* Everything here needs at least 5 chars in the name:
 	 * cmd, userid and more data or at least 3 bytes CMC */
@@ -1846,15 +1816,15 @@ handle_null_request(int dns_fd, struct query *q, int domain_len)
 	cmd = toupper(in[0]);
 	DEBUG(3, "NULL request length %d/%" L "u, command '%c'", domain_len, sizeof(in), cmd);
 
-	/* Commands that do not care about userid: also these need to be backwards
-	 * compatible with older versions of iodine (at least down to 00000502) */
-	if (cmd == 'V') { /* Version check - before userid is assigned*/
+	/* Pre-login commands: backwards compatible with protocol 00000402
+	 * TODO make replies also backwards compatible (without HMAC/codec bits) */
+	if (cmd == 'V') { /* Version check - before userid is assigned */
 		handle_dns_version(dns_fd, q, in, domain_len);
 		return;
 	}
 	else if (cmd == 'Z') { /* Upstream codec check - user independent */
 		/* Reply with received hostname as data (encoded in base32) */
-		write_dns(dns_fd, q, (char *)in, domain_len, 'T');
+		write_dns(dns_fd, q, -1, in, domain_len, C_BASE32);
 		return;
 	}
 	else if (cmd == 'Y') { /* Downstream codec check - user independent */
@@ -1865,67 +1835,100 @@ handle_null_request(int dns_fd, struct query *q, int domain_len)
 	/* Get userid from query (always 2nd byte in hex except for data packets) */
 	if (isxdigit(cmd)) {
 		/* Upstream data packet - first byte is userid in hex */
-		userchar = cmd;
+		userid = HEX2INT(cmd);
 		cmd = 'd'; /* flag for data packet - not part of protocol */
 	} else {
 		userchar = toupper(in[1]);
-	}
-
-	if (isxdigit(userchar)) {
-		userid = (userchar >= 'A' && userchar <= 'F') ?
-			(userchar - 'A' + 10) : (userchar - '0');
-	} else {
-		/* Invalid user ID or bad DNS query */
-		write_dns(dns_fd, q, "BADLEN", 5, 'T');
-	}
-
-	/* Login request - after version check successful, do not check auth yet */
-	if (cmd == 'L') {
-		handle_dns_login(dns_fd, q, in, domain_len, userid);
-		return;
+		userid = HEX2INT(userchar);
+		if (!isxdigit(userchar) || !is_valid_user(userid)) {
+			/* Invalid user ID or bad DNS query */
+			write_dns(dns_fd, q, -1, NULL, 0, DH_ERR(BADUSER));
+			return;
+		}
 	}
 
 	/* Check user IP and authentication status */
-	if (check_authenticated_user_and_ip(userid, q, server.check_ip) != 0) {
-		write_dns(dns_fd, q, "BADIP", 5, 'T');
+	if (cmd != 'L' && !users[userid].authenticated) {
+		write_dns(dns_fd, q, -1, NULL, 0, DH_ERR(BADUSER));
 		return;
 	}
 
-	if (cmd == 'd') { /* Upstream data packet */
-		handle_dns_data(dns_fd, q, in, domain_len, userid);
-		return;
-	} else if (cmd == 'I') { /* IP request packet - no base32 data */
-		handle_dns_ip_request(dns_fd, q, userid);
+	if (cmd == 'd') {
+		/* now we know userid exists, we can set encoder */
+		enc = users[userid].encoder;
+		hmaclen = 4;
+		headerlen = 1;
 	}
 
-	/* Following commands have everything after cmd and userid in base32
-	 *  All bytes that are not valid base32 are decoded to 0 */
+	/* Following commands have everything after cmd and userid encoded
+	 *  All bytes that are not valid are decoded to 0
+	 *  Header consists of 4 bytes CMC + 4-12 bytes HMAC */
 
 	uint8_t unpacked[512];
 	size_t raw_len;
-	raw_len = unpack_data(unpacked, sizeof(unpacked), (uint8_t *)in + 2, domain_len - 2, b32);
-	if (raw_len < 3) /* always at least 3 bytes after decoding at least 5 bytes */
-		return; /* Just in case. */
+	raw_len = unpack_data(unpacked, sizeof(unpacked), (uint8_t *)in + headerlen,
+			domain_len - headerlen, enc);
+	if (raw_len < hmaclen + 4) {
+		write_dns(dns_fd, q, userid, NULL, 0, DH_ERR(BADLEN));
+		return;
+	}
+
+	cmc = ntohl(*(uint32_t *) unpacked);
+
+	/* Login request - after version check successful, do not check auth yet */
+	if (cmd == 'L') {
+		handle_dns_login(dns_fd, q, unpacked, raw_len, userid, cmc);
+		return;
+	}
+
+	/* now verify HMAC!
+	 * Packet data and header is assembled (data is not encoded yet).
+	2. HMAC field is set to 0.
+	3. Data to be encoded is appended to string (ie. cmd + userid chars) at
+		beginning of query name.
+	4. Length (32 bits, network byte order) is prepended to the result from (3)
+	5. HMAC is calculated using the output from (4) and inserted into the HMAC
+		field in the data header. The data is then encoded (ie. base32 + dots)
+		and the query is sent.*/
+	uint8_t hmacbuf[raw_len + 4 + headerlen];
+	memcpy(hmac_pkt, unpacked + 4, hmaclen);
+	/* copy to temp buffer */
+	memcpy(hmacbuf + 4, in, headerlen);
+	memcpy(hmacbuf + 4 + headerlen, unpacked, raw_len);
+	memset(hmacbuf + headerlen + 8, 0, hmaclen);
+	*(uint32_t *) hmacbuf = htonl(raw_len + headerlen);
+	hmac_md5(hmac, users[userid].hmac_key, 16, hmacbuf, sizeof(hmacbuf));
+	if (memcmp(hmac, hmac_pkt, hmaclen) != 0) {
+		DEBUG(2, "HMAC mismatch! pkt: 0x%016llx%016llx, actual: 0x%016llx%016llx (%" L "u)",
+			*(uint64_t*)hmac_pkt, *(uint64_t*)(hmac_pkt+8),
+			*(uint64_t*)hmac, *(uint64_t*)(hmac + 8), hmaclen);
+		return;
+	}
+
+	if (cmd == 'd') { /* Upstream data packet: different encoding used */
+		handle_dns_data(dns_fd, q, unpacked, raw_len, userid);
+		return;
+	}
 
 	switch (cmd) {
-		case 'S':
-			handle_dns_upstream_codec_switch(dns_fd, q, userid, unpacked, raw_len);
-			break;
-		case 'O':
-			handle_dns_set_options(dns_fd, q, userid, unpacked, raw_len);
-			break;
-		case 'R':
-			handle_dns_fragsize_probe(dns_fd, q, userid, unpacked, raw_len);
-			break;
-		case 'N':
-			handle_dns_set_fragsize(dns_fd, q, userid, unpacked, raw_len);
-			break;
-		case 'P':
-			handle_dns_ping(dns_fd, q, userid, unpacked, raw_len);
-			break;
-		default:
-			DEBUG(2, "Invalid DNS query! cmd = %c, hostname = '%*s'",
-				  cmd, domain_len, in);
+	case 'I':
+		handle_dns_ip_request(dns_fd, q, userid);
+		break;
+	case 'O':
+		handle_dns_set_options(dns_fd, q, userid, unpacked, raw_len);
+		break;
+	case 'R':
+		handle_dns_fragsize_probe(dns_fd, q, userid, unpacked, raw_len);
+		break;
+	case 'N':
+		handle_dns_set_fragsize(dns_fd, q, userid, unpacked, raw_len);
+		break;
+	case 'P':
+		handle_dns_ping(dns_fd, q, userid, unpacked, raw_len);
+		break;
+	default:
+		DEBUG(2, "Invalid DNS query! cmd = %c, hostname = '%*s'",
+			  cmd, domain_len, in);
 	}
 }
 

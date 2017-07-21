@@ -22,6 +22,10 @@
 #include <string.h>
 #include "common.h"
 #include "encoding.h"
+#include "base32.h"
+#include "base64.h"
+#include "base64u.h"
+#include "base128.h"
 
 size_t
 get_raw_length_from_dns(size_t enc_bytes, struct encoder *enc, const char *topdomain)
@@ -161,4 +165,47 @@ inline_undotify(uint8_t *buf, size_t len)
 
 	/* return new length of string */
 	return len - dots;
+}
+
+struct encoder *
+get_encoder(uint8_t codec)
+{
+	switch (codec & 0x7) {
+	case C_BASE32:
+		return b32;
+	case C_BASE64:
+		return b64;
+	case C_BASE64U:
+		return b64u;
+	case C_BASE128:
+		return b128;
+	case C_RAW:
+	default:
+		return NULL;
+	}
+}
+
+size_t
+encode_data(uint8_t *buf, size_t buflen, uint8_t *data,
+		size_t datalen, uint8_t codec, int dots)
+/* Returns #bytes of data that were encoded */
+{
+	struct encoder *enc;
+
+	/* encode data,datalen to CNAME/MX answer */
+	enc = get_encoder(codec);
+	if (enc == NULL) {
+		if (dots) {
+			datalen = inline_dotify(data, datalen);
+		}
+		memcpy(buf, data, MIN(buflen, datalen));
+		return MIN(buflen, datalen);
+	}
+
+	if (dots) {
+		return build_hostname(buf, buflen, data, datalen, "", enc, 0xFF, 1);
+	} else {
+		buflen--;
+		return enc->encode(buf + 1, &buflen, data, datalen);
+	}
 }

@@ -33,8 +33,8 @@
 
 struct encoder {
 	char name[8];
-	size_t (*encode) (uint8_t *, size_t *, const uint8_t *, size_t);
-	size_t (*decode) (uint8_t *, size_t *, const uint8_t *, size_t);
+	size_t (*encode) (uint8_t *buf, size_t *buflen, const uint8_t *udata, size_t size);
+	size_t (*decode) (uint8_t *buf, size_t *buflen, const uint8_t *udata, size_t size);
 	int (*places_dots) (void);
 	int (*eats_dots) (void);
 	size_t (*blocksize_raw)(void);
@@ -50,6 +50,9 @@ size_t build_hostname(uint8_t *, size_t, const uint8_t *, const size_t, const ch
 size_t unpack_data(uint8_t *, size_t, uint8_t *, size_t, struct encoder *);
 size_t inline_dotify(uint8_t *, size_t);
 size_t inline_undotify(uint8_t *, size_t);
+struct encoder *get_encoder(uint8_t codec);
+size_t encode_data(uint8_t *, size_t, uint8_t *, size_t, uint8_t, int);
+
 
 
 #endif /* _ENCODING_H_ */

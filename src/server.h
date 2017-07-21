@@ -152,7 +152,7 @@ void server_stop();
 int server_tunnel();
 
 int read_dns(int fd, struct query *q);
-void write_dns(int fd, struct query *q, char *data, size_t datalen, char downenc);
+void write_dns(int fd, struct query *q, int userid, uint8_t *data, size_t datalen, uint8_t flags);
 void handle_full_packet(int userid, uint8_t *data, size_t len, int);
 void handle_null_request(int dns_fd, struct query *q, int domain_len);
 void handle_ns_request(int dns_fd, struct query *q);

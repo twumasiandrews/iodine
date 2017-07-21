@@ -25,21 +25,52 @@
 #endif
 
 /* Last byte of raw header is the command */
-#define RAW_HDR_LEN 4
-#define RAW_HDR_IDENT_LEN 3
-#define RAW_HDR_CMD 3
-#define RAW_HDR_CMD_LOGIN 0x10
-#define RAW_HDR_CMD_DATA  0x20
-#define RAW_HDR_CMD_PING  0x30
+#define RAW_HDR_LEN			20
+#define RAW_HDR_IDENT_LEN	3
+#define RAW_HDR_CMD			3
+#define RAW_HDR_CMC			4
+#define RAW_HDR_HMAC		8
+#define RAW_HDR_HMAC_LEN	12
+#define RAW_HDR_CMD_LOGIN	0x10
+#define RAW_HDR_CMD_DATA	0x20
+#define RAW_HDR_CMD_PING	0x30
 
-#define RAW_HDR_CMD_MASK  0xF0
-#define RAW_HDR_USR_MASK  0x0F
-#define RAW_HDR_GET_CMD(x) ((x)[RAW_HDR_CMD] & RAW_HDR_CMD_MASK)
-#define RAW_HDR_GET_USR(x) ((x)[RAW_HDR_CMD] & RAW_HDR_USR_MASK)
+#define RAW_HDR_CMD_MASK	0xF0
+#define RAW_HDR_USR_MASK	0x0F
+#define RAW_HDR_GET_CMD(x)	((x)[RAW_HDR_CMD] & RAW_HDR_CMD_MASK)
+#define RAW_HDR_GET_USR(x)	((x)[RAW_HDR_CMD] & RAW_HDR_USR_MASK)
 
 #define MAX_CMC (0xFFFFFFFF)
 #define CMC(cmc) ((cmc + 1) == MAX_CMC ? 0 : (cmc++))
+
+/* convert uppercase hex char [A-F0-9] to int */
+#define HEX2INT(c) 	((c >= 'A' && c <= 'F') ? (c - 'A' + 10) : (c - '0'))
+
 extern const unsigned char raw_header[RAW_HDR_LEN];
+
+/* DNS Downstream header flags */
+#define DH_HMAC96	(0 << 4)
+#define DH_HMAC32	(1 << 4)
+#define DH_ERROR	(1 << 3)
+#define DH_ERR(x)	(E_##x | DH_ERROR)
+
+/* Codec type IDs and type chars (backwards compatibility) */
+#define C_RAW		0x0 // 'R'
+#define C_BASE64	0x1 // 'S'
+#define C_BASE32	0x2	// 'T'
+#define C_BASE64U	0x3 // 'U'
+#define C_BASE128	0x4 // 'V'
+
+#define C_CHAR2NUM(c)	((toupper(c) - 'R') & 7)
+#define C_NUM2CHAR(n)	((n & 7 + 'R')
+
+/* Error codes */
+#define E_BADLEN	0x0
+#define E_BADHMAC	0x1
+#define E_BADUSER	0x2
+#define E_BADCODEC	0x3
+#define E_BADFRAG	0x4
+#define E_BADLOGIN	0x5
 
 #ifdef WINDOWS32
 #include "windows.h"
@@ -112,10 +143,11 @@ extern const unsigned char raw_header[RAW_HDR_LEN];
 #define T_UNSET 65432
 /* Unused RR type, never actually sent */
 
-#define DOWNSTREAM_HDR 3
-#define DOWNSTREAM_PING_HDR 7
-#define UPSTREAM_HDR 6
-#define UPSTREAM_PING 11
+#define DOWNSTREAM_HDR_R	17
+#define DOWNSTREAM_DATA_HDR	3
+#define DOWNSTREAM_PING_HDR	7
+#define UPSTREAM_DATA_HDR	2
+#define UPSTREAM_PING		9
 
 /* handy debug printing macro */
 #ifdef DEBUG_BUILD

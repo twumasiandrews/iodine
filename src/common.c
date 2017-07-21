@@ -56,9 +56,16 @@
 #endif
 
 #include "common.h"
+#include "encoding.h"
 
 /* The raw header used when not using DNS protocol */
-const unsigned char raw_header[RAW_HDR_LEN] = { 0x10, 0xd1, 0x9e, 0x00 };
+const unsigned char raw_header[RAW_HDR_LEN] = {
+		0x10, 0xd1, 0x9e, 0x00,
+		0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00
+	};
 
 /* daemon(3) exists only in 4.4BSD or later, and in GNU libc */
 #if !defined(ANDROID) && !defined(WINDOWS32) && !(defined(BSD) && (BSD >= 199306)) && !defined(__GLIBC__)
