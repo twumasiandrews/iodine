@@ -151,13 +151,13 @@ void server_init();
 void server_stop();
 int server_tunnel();
 
-int read_dns(int fd, struct query *q);
-void write_dns(int fd, struct query *q, int userid, uint8_t *data, size_t datalen, uint8_t flags);
-void handle_full_packet(int userid, uint8_t *data, size_t len, int);
-void handle_null_request(int dns_fd, struct query *q, int domain_len);
-void handle_ns_request(int dns_fd, struct query *q);
-void handle_a_request(int dns_fd, struct query *q, int fakeip);
+static int read_dns(int fd, struct query *q);
+static void write_dns(int fd, struct query *q, int userid, uint8_t *data, size_t datalen, uint8_t flags);
+static void handle_full_packet(int userid, uint8_t *data, size_t len, int);
+static void handle_null_request(int dns_fd, struct query *q, int domain_len);
+static void handle_ns_request(int dns_fd, struct query *q);
+static void handle_a_request(int dns_fd, struct query *q, int fakeip);
 
-void send_data_or_ping(int, struct query *, int, int, char*);
+static void send_data_or_ping(int, struct query *, int, int, char*);
 
 #endif /* __SERVER_H__ */

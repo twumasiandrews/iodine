@@ -236,7 +236,7 @@ qmem_answered(int userid, uint8_t *data, size_t len)
 	QMEM_DEBUG(3, userid, "query ID %d answered", buf->queries[answered].q.id);
 }
 
-struct query *
+static struct query *
 qmem_get_next_response(int userid)
 /* Gets oldest query to be responded to (for lazy mode) or NULL if none available
  * The query is NOT marked as "answered" since that is done later. */
@@ -440,7 +440,7 @@ send_version_response(int fd, version_ack_t ack, uint32_t payload, int userid, s
 	write_dns(fd, q, -1, out, len, C_BASE32);
 }
 
-void
+static void
 send_data_or_ping(int userid, struct query *q, int ping, int immediate, char *tcperror)
 /* Sends current fragment to user, or a ping if no data available.
    ping: 1=force send ping (even if data available), 0=only send if no data.
@@ -523,7 +523,7 @@ send_data_or_ping(int userid, struct query *q, int ping, int immediate, char *tc
 	window_tick(out);
 }
 
-void
+static void
 user_process_incoming_data(int userid, int ack)
 {
 	uint8_t pkt[65536];
@@ -883,7 +883,7 @@ server_tunnel()
 	return 0;
 }
 
-void
+static void
 handle_full_packet(int userid, uint8_t *data, size_t len, int compressed)
 {
 	size_t rawlen;
@@ -1050,7 +1050,7 @@ raw_decode(uint8_t *packet, size_t len, struct query *q, int dns_fd)
 	return 1;
 }
 
-int
+static int
 read_dns(int fd, struct query *q)
 {
 	struct sockaddr_storage from;
@@ -1132,7 +1132,7 @@ read_dns(int fd, struct query *q)
 	return 0;
 }
 
-size_t
+static size_t
 downstream_encode(uint8_t *out, size_t outlen, uint8_t *data,
 		size_t datalen, int userid, uint8_t flags, int encode, int dots)
 /* Adds downstream header (flags+CMC+HMAC) to given data and encode
@@ -1180,7 +1180,7 @@ downstream_encode(uint8_t *out, size_t outlen, uint8_t *data,
 #define WD_AUTO (1 << 5)
 #define WD_OLD	(1 << 6)
 
-void
+static void
 write_dns(int fd, struct query *q, int userid, uint8_t *data, size_t datalen, uint8_t flags)
 {
 	uint8_t buf[64*1024], tmpbuf[64*1024];
@@ -1251,7 +1251,7 @@ write_dns(int fd, struct query *q, int userid, uint8_t *data, size_t datalen, ui
 #define CHECK_LEN_NOU(l, x) CHECK_LEN_U(l, x, -1)
 #define CHECK_LEN(l, x)		CHECK_LEN_U(l, x, userid)
 
-void
+static void
 handle_dns_version(int dns_fd, struct query *q, uint8_t *domain, int domain_len)
 {
 	uint8_t unpacked[512];
@@ -1327,7 +1327,7 @@ handle_dns_version(int dns_fd, struct query *q, uint8_t *domain, int domain_len)
 			*(uint64_t*)u->server_chall, *(uint64_t*)(u->server_chall+8));
 }
 
-void
+static void
 handle_dns_downstream_codec_check(int dns_fd, struct query *q, uint8_t *domain, int domain_len)
 {
 	char *datap;
@@ -1363,7 +1363,7 @@ handle_dns_downstream_codec_check(int dns_fd, struct query *q, uint8_t *domain, 
 }
 
 
-void
+static void
 handle_dns_ip_request(int dns_fd, struct query *q, int userid)
 {
 	char reply[17];
@@ -1388,7 +1388,7 @@ handle_dns_ip_request(int dns_fd, struct query *q, int userid)
 	write_dns(dns_fd, q, userid, reply, length, WD_AUTO);
 }
 
-void
+static void
 handle_dns_upstream_codec_switch(int dns_fd, struct query *q, int userid,
 								 uint8_t *unpacked, size_t read)
 {
@@ -1408,7 +1408,7 @@ handle_dns_upstream_codec_switch(int dns_fd, struct query *q, int userid,
 
 }
 
-void
+static void
 handle_dns_set_options(int dns_fd, struct query *q, int userid,
 					   uint8_t *unpacked, size_t read)
 {
@@ -1551,7 +1551,7 @@ handle_dns_set_options(int dns_fd, struct query *q, int userid,
 	write_dns(dns_fd, q, userid, encname, strlen(encname), WD_AUTO);
 }
 
-void
+static void
 handle_dns_fragsize_probe(int dns_fd, struct query *q, int userid,
 						  uint8_t *unpacked, size_t read)
 /* Downstream fragsize probe packet */
@@ -1578,7 +1578,7 @@ handle_dns_fragsize_probe(int dns_fd, struct query *q, int userid,
 	}
 }
 
-void
+static void
 handle_dns_set_fragsize(int dns_fd, struct query *q, int userid,
 						uint8_t *unpacked, size_t read)
 	/* Downstream fragsize packet */
@@ -1599,7 +1599,7 @@ handle_dns_set_fragsize(int dns_fd, struct query *q, int userid,
 	}
 }
 
-void
+static void
 handle_dns_ping(int dns_fd, struct query *q, int userid,
 				uint8_t *unpacked, size_t read)
 {
@@ -1678,7 +1678,7 @@ handle_dns_ping(int dns_fd, struct query *q, int userid,
 	user_process_incoming_data(userid, dn_ack);
 }
 
-void
+static void
 handle_dns_data(int dns_fd, struct query *q, uint8_t *unpacked, size_t len, int userid)
 {
 	fragment f;
@@ -1721,7 +1721,7 @@ handle_dns_data(int dns_fd, struct query *q, uint8_t *unpacked, size_t len, int 
 	 * using an old query. This is left in qmem until needed/times out */
 }
 
-void
+static void
 handle_dns_login(int dns_fd, struct query *q, uint8_t *unpacked,
 		size_t len, int userid, uint32_t cmc)
 {
@@ -1792,7 +1792,7 @@ handle_dns_login(int dns_fd, struct query *q, uint8_t *unpacked,
 	write_dns(dns_fd, q, userid, out, sizeof(out), WD_AUTO);
 }
 
-void
+static void
 handle_null_request(int dns_fd, struct query *q, int domain_len)
 /* Handles a NULL DNS request. See doc/proto_XXXXXXXX.txt for details on iodine protocol. */
 {
@@ -1920,6 +1920,9 @@ handle_null_request(int dns_fd, struct query *q, int domain_len)
 	case 'R':
 		handle_dns_fragsize_probe(dns_fd, q, userid, unpacked, raw_len);
 		break;
+	case 'S':
+		handle_dns_upstream_codec_switch(dns_fd, q, userid, unpacked, raw_len);
+		break;
 	case 'N':
 		handle_dns_set_fragsize(dns_fd, q, userid, unpacked, raw_len);
 		break;
@@ -1932,7 +1935,7 @@ handle_null_request(int dns_fd, struct query *q, int domain_len)
 	}
 }
 
-void
+static void
 handle_ns_request(int dns_fd, struct query *q)
 /* Mostly identical to handle_a_request() below */
 {
@@ -1959,7 +1962,7 @@ handle_ns_request(int dns_fd, struct query *q)
 	}
 }
 
-void
+static void
 handle_a_request(int dns_fd, struct query *q, int fakeip)
 /* Mostly identical to handle_ns_request() above */
 {
