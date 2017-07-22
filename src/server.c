@@ -1359,7 +1359,7 @@ handle_dns_downstream_codec_check(int dns_fd, struct query *q, uint8_t *domain, 
 	}
 
 	/* if still here, then codec not available */
-	write_dns(dns_fd, q, -1, NULL, 0, DH_ERR(BADCODEC));
+	write_dns(dns_fd, q, -1, NULL, 0, DH_ERR(BADOPTS));
 }
 
 
@@ -1520,7 +1520,7 @@ handle_dns_set_options(int dns_fd, struct query *q, int userid,
 		bits = 8;
 		break;
 	default: /* Invalid (More than 1 encoding bit set) */
-		write_dns(dns_fd, q, userid, NULL, 0, DH_ERR(BADCODEC));
+		write_dns(dns_fd, q, userid, NULL, 0, DH_ERR(BADOPTS));
 		return;
 	}
 
@@ -1562,7 +1562,7 @@ handle_dns_fragsize_probe(int dns_fd, struct query *q, int userid,
 	DEBUG(3, "Got downstream fragsize probe from user %d, required fragsize %d", userid, req_frag_size);
 
 	if (req_frag_size < 2 || req_frag_size > MAX_FRAGSIZE) {
-		write_dns(dns_fd, q, userid, NULL, 0, DH_ERR(BADFRAG));
+		write_dns(dns_fd, q, userid, NULL, 0, DH_ERR(BADOPTS));
 	} else {
 		uint8_t buf[MAX_FRAGSIZE];
 		unsigned int v = ((unsigned int) rand()) & 0xff;
@@ -1587,7 +1587,7 @@ handle_dns_set_fragsize(int dns_fd, struct query *q, int userid,
 	max_frag_size = ntohs(*(uint16_t *)unpacked);
 
 	if (max_frag_size < 2 || max_frag_size > MAX_FRAGSIZE) {
-		write_dns(dns_fd, q, userid, NULL, 0, DH_ERR(BADFRAG));
+		write_dns(dns_fd, q, userid, NULL, 0, DH_ERR(BADOPTS));
 	} else {
 		users[userid].fragsize = max_frag_size;
 		window_buffer_resize(users[userid].outgoing, users[userid].outgoing->length,
@@ -1734,7 +1734,7 @@ handle_dns_login(int dns_fd, struct query *q, uint8_t *unpacked,
 	strncpy(fromaddr, format_addr(&q->from, q->fromlen), 100);
 
 	if (!is_valid_user(userid)) {
-		write_dns(dns_fd, q, userid, NULL, 0, DH_ERR(BADUSER));
+		write_dns(dns_fd, q, userid, NULL, 0, DH_ERR(BADAUTH));
 		syslog(LOG_WARNING, "rejected login request from user #%d from %s",
 			userid, fromaddr);
 		DEBUG(1, "Rejected login request from user %d (%s): BADUSER", userid, fromaddr);
@@ -1842,14 +1842,14 @@ handle_null_request(int dns_fd, struct query *q, int domain_len)
 		userid = HEX2INT(userchar);
 		if (!isxdigit(userchar) || !is_valid_user(userid)) {
 			/* Invalid user ID or bad DNS query */
-			write_dns(dns_fd, q, -1, NULL, 0, DH_ERR(BADUSER));
+			write_dns(dns_fd, q, -1, NULL, 0, DH_ERR(BADAUTH));
 			return;
 		}
 	}
 
 	/* Check user IP and authentication status */
 	if (cmd != 'L' && !users[userid].authenticated) {
-		write_dns(dns_fd, q, -1, NULL, 0, DH_ERR(BADUSER));
+		write_dns(dns_fd, q, -1, NULL, 0, DH_ERR(BADAUTH));
 		return;
 	}
 
