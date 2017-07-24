@@ -23,15 +23,13 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-static int
-readname_loop(char *packet, int packetlen, char **src, char *dst, size_t length, size_t loop)
+/* TODO allow raw-encoded hostnames */
+size_t
+readname_loop(uint8_t *packet, size_t packetlen, uint8_t **src, uint8_t *dst, size_t length, size_t loop)
 {
-	char *dummy;
-	char *s;
-	char *d;
-	int len;
-	int offset;
-	char c;
+	uint8_t *dummy, *s, *d;
+	size_t len, offset;
+	uint8_t labellen;
 
 	if (loop <= 0)
 		return 0;
@@ -39,12 +37,12 @@ readname_loop(char *packet, int packetlen, char **src, char *dst, size_t length,
 	len = 0;
 	s = *src;
 	d = dst;
-	while(*s && len < length - 2) {
-		c = *s++;
+	while(*s && len < length - 1) {
+		labellen = *s++;
 
 		/* is this a compressed label? */
-		if((c & 0xc0) == 0xc0) {
-			offset = (((s[-1] & 0x3f) << 8) | (s[0] & 0xff));
+		if((labellen & 0xc0) == 0xc0) {
+			offset = (((labellen & 0x3f) << 8) | (*s++ & 0xff));
 			if (offset > packetlen) {
 				if (len == 0) {
 					/* Bad jump first in packet */
@@ -57,16 +55,18 @@ readname_loop(char *packet, int packetlen, char **src, char *dst, size_t length,
 			dummy = packet + offset;
 			len += readname_loop(packet, packetlen, &dummy, d, length - len, loop - 1);
 			goto end;
+		} else if ((labellen & 0xc0) != 0) {
+			/* invalid hostname, abort */
+			break;
 		}
 
-		while(c && len < length - 1) {
+		while (labellen && len < length - 1 && packetlen - (s - packet) > 1) {
 			*d++ = *s++;
 			len++;
-
-			c--;
+			labellen--;
 		}
 
-		if (len >= length - 1) {
+		if (len >= length || packetlen - (s - packet) < 1) {
 			break; /* We used up all space */
 		}
 
@@ -75,38 +75,37 @@ readname_loop(char *packet, int packetlen, char **src, char *dst, size_t length,
 			len++;
 		}
 	}
-	dst[len++] = '\0';
 
 end:
 	(*src) = s+1;
 	return len;
 }
 
-int
-readname(char *packet, int packetlen, char **src, char *dst, size_t length)
+size_t
+readname(uint8_t *packet, size_t packetlen, uint8_t **src, uint8_t *dst, size_t length)
 {
 	return readname_loop(packet, packetlen, src, dst, length, 10);
 }
 
-int
-readshort(char *packet, char **src, unsigned short *dst)
+size_t
+readshort(uint8_t *packet, uint8_t **src, uint16_t *dst)
 {
-	unsigned char *p;
+	uint8_t *p;
 
-	p = (unsigned char *) *src;
+	p = *src;
 	*dst = (p[0] << 8) | p[1];
 
-	(*src) += sizeof(unsigned short);
-	return sizeof(unsigned short);
+	(*src) += sizeof(uint16_t);
+	return sizeof(uint16_t);
 }
 
-int
-readlong(char *packet, char **src, uint32_t *dst)
+size_t
+readlong(uint8_t *packet, uint8_t **src, uint32_t *dst)
 {
 	/* A long as described in dns protocol is always 32 bits */
-	unsigned char *p;
+	uint8_t *p;
 
-	p = (unsigned char *) *src;
+	p = *src;
 
 	*dst = ((uint32_t)p[0] << 24)
 		 | ((uint32_t)p[1] << 16)
@@ -117,8 +116,8 @@ readlong(char *packet, char **src, uint32_t *dst)
 	return sizeof(uint32_t);
 }
 
-int
-readdata(char *packet, char **src, char *dst, size_t len)
+size_t
+readdata(uint8_t *packet, uint8_t **src, uint8_t *dst, size_t len)
 {
 	memcpy(dst, *src, len);
 
@@ -127,16 +126,16 @@ readdata(char *packet, char **src, char *dst, size_t len)
 	return len;
 }
 
-int
-readtxtbin(char *packet, char **src, size_t srcremain, char *dst, size_t dstremain)
+size_t
+readtxtbin(uint8_t *packet, uint8_t **src, size_t srcremain, uint8_t *dst, size_t dstremain)
 {
-	unsigned char *uc;
-	int tocopy;
-	int dstused = 0;
+	uint8_t *uc;
+	size_t tocopy;
+	size_t dstused = 0;
 
 	while (srcremain > 0)
 	{
-		uc = (unsigned char*) (*src);
+		uc = (*src);
 		tocopy = *uc;
 		(*src)++;
 		srcremain--;
@@ -156,83 +155,86 @@ readtxtbin(char *packet, char **src, size_t srcremain, char *dst, size_t dstrema
 	return dstused;
 }
 
-int
-putname(char **buf, size_t buflen, const char *host)
+size_t
+putname(uint8_t **buf, size_t buflen, uint8_t *host, size_t hostlen)
 {
-	char *word;
-	int left;
-	char *h;
-	char *p;
+	uint8_t *p, *labelprefix, *h;
+	size_t len = 0, total = 0, hpos = 0;
 
-	h = strdup(host);
-	left = buflen;
-	p = *buf;
+	labelprefix = p = *buf;
+	h = host;
+	p++;
 
-	word = strtok(h, ".");
-	while(word) {
-		if (strlen(word) > 63 || strlen(word) > left) {
-			free(h);
-			return -1;
+	while (1) {
+		if (*h == '.' || hpos >= hostlen) {
+			h++;
+			*labelprefix = (uint8_t) len & 0x3F;
+			labelprefix = p++;
+			len = 0; /* start next label */
+		} else {
+			*p++ = *h++;
+			len++;
 		}
 
-		left -= (strlen(word) + 1);
-		*p++ = (char)strlen(word);
-		memcpy(p, word, strlen(word));
-		p += strlen(word);
-
-		word = strtok(NULL, ".");
+		if (len >= 63 || total >= buflen) {
+			/* invalid hostname or buffer too small */
+			return 0;
+		}
+		hpos++;
+		total++;
+		if (hpos > hostlen) {
+			break;
+		}
 	}
 
-	*p++ = 0;
-
-	free(h);
-
+	*p++ = 0; /* add root label (len=0) */
 	*buf = p;
-	return buflen - left;
+
+	return total + 1;
 }
 
-int
-putbyte(char **dst, unsigned char value)
+size_t
+putbyte(uint8_t **dst, uint8_t value)
 {
 	**dst = value;
 	(*dst)++;
 
-	return sizeof(char);
+	return sizeof(uint8_t);
 }
 
-int
-putshort(char **dst, unsigned short value)
+size_t
+putshort(uint8_t **dst, uint16_t value)
 {
-	unsigned char *p;
+	uint8_t *p;
 
-	p = (unsigned char *) *dst;
+	p = *dst;
 
 	*p++ = (value >> 8);
 	*p++ = value;
 
-	(*dst) = (char *) p;
-	return sizeof(short);
+	(*dst) = p;
+	return sizeof(uint16_t);
 }
 
-int
-putlong(char **dst, uint32_t value)
+size_t
+putlong(uint8_t **dst, uint32_t value)
 {
 	/* A long as described in dns protocol is always 32 bits */
-	unsigned char *p;
+	uint8_t *p;
 
-	p = (unsigned char *) *dst;
+	p = *dst;
 
 	*p++ = (value >> 24);
 	*p++ = (value >> 16);
 	*p++ = (value >> 8);
 	*p++ = (value);
 
-	(*dst) = (char *) p;
+	(*dst) = p;
 	return sizeof(uint32_t);
 }
 
-int
-putdata(char **dst, char *data, size_t len)
+size_t
+putdata(uint8_t **dst, uint8_t *data, size_t len)
 {
 	memcpy(*dst, data, len);
 
@@ -240,14 +242,13 @@ putdata(char **dst, char *data, size_t len)
 	return len;
 }
 
-int
-puttxtbin(char **buf, size_t bufremain, char *from, size_t fromremain)
+size_t
+puttxtbin(uint8_t **buf, size_t bufremain, uint8_t *from, size_t fromremain)
 {
-	unsigned char uc;
-	unsigned char *ucp = &uc;
-	char *cp = (char *) ucp;
-	int tocopy;
-	int bufused = 0;
+	uint8_t uc;
+	uint8_t *ucp = &uc;
+	uint8_t *cp = ucp;
+	size_t tocopy, bufused = 0;
 
 	while (fromremain > 0)
 	{

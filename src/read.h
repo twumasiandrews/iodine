@@ -18,17 +18,17 @@
 #ifndef _READ_H_
 #define _READ_H_
 
-int readname(char *, int, char **, char *, size_t);
-int readshort(char *, char **, unsigned short *);
-int readlong(char *, char **, uint32_t *);
-int readdata(char *, char **, char *, size_t);
-int readtxtbin(char *, char **, size_t, char *, size_t);
+size_t readname(uint8_t *, size_t, uint8_t **, uint8_t *, size_t);
+size_t readshort(uint8_t *, uint8_t **, uint16_t *);
+size_t readlong(uint8_t *, uint8_t **, uint32_t *);
+size_t readdata(uint8_t *, uint8_t **, uint8_t *, size_t);
+size_t readtxtbin(uint8_t *, uint8_t **, size_t, uint8_t *, size_t);
 
-int putname(char **, size_t, const char *);
-int putbyte(char **, unsigned char);
-int putshort(char **, unsigned short);
-int putlong(char **, uint32_t);
-int putdata(char **, char *, size_t);
-int puttxtbin(char **, size_t, char *, size_t);
+size_t putname(uint8_t **, size_t, uint8_t *, size_t);
+size_t putbyte(uint8_t **, uint8_t);
+size_t putshort(uint8_t **, uint16_t);
+size_t putlong(uint8_t **, uint32_t);
+size_t putdata(uint8_t **, uint8_t *, size_t);
+size_t puttxtbin(uint8_t **, size_t, uint8_t *, size_t);
 
 #endif

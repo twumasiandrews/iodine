@@ -44,17 +44,17 @@ START_TEST(test_read_putshort)
 {
 	unsigned short k;
 	unsigned short l;
-	char* p;
-	int i;
+	uint8_t* p;
+	size_t i;
 
 	for (i = 0; i < 65536; i++) {
-		p = (char*)&k;
+		p = &k;
 		putshort(&p, i);
 		fail_unless(ntohs(k) == i,
 				"Bad value on putshort for %d: %d != %d",
 					i, ntohs(k), i);
 
-		p = (char*)&k;
+		p = &k;
 		readshort(NULL, &p, &l);
 		fail_unless(l == i,
 				"Bad value on readshort for %d: %d != %d",
@@ -65,14 +65,11 @@ END_TEST
 
 START_TEST(test_read_putlong)
 {
-	uint32_t k;
-	uint32_t l;
-	char* p;
-	int i;
-	int j;
+	uint32_t k, l, i, j;
+	uint8_t* p;
 
 	for (i = 0; i < 32; i++) {
-		p = (char*)&k;
+		p = (uint8_t *)&k;
 		j = 0xf << i;
 
 		putlong(&p, j);
@@ -80,7 +77,7 @@ START_TEST(test_read_putlong)
 		fail_unless(ntohl(k) == j,
 				"Bad value on putlong for %d: %d != %d", i, ntohl(j), j);
 
-		p = (char*)&k;
+		p = (uint8_t *)&k;
 		readlong(NULL, &p, &l);
 
 		fail_unless(l == j,
@@ -91,17 +88,17 @@ END_TEST
 
 START_TEST(test_read_name_empty_loop)
 {
-	unsigned char emptyloop[] = {
+	uint8_t emptyloop[] = {
 		'A', 'A', 0x81, 0x80, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 		0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01 };
-	char buf[1024];
-	char *data;
-	int rv;
+	uint8_t buf[1024];
+	uint8_t *data;
+	size_t rv;
 
 	memset(buf, 0, sizeof(buf));
-	data = (char*) emptyloop + sizeof(HEADER);
+	data = emptyloop + sizeof(HEADER);
 	buf[1023] = 'A';
-	rv = readname((char *) emptyloop, sizeof(emptyloop), &data, buf, 1023);
+	rv = readname(emptyloop, sizeof(emptyloop), &data, buf, 1023);
 	fail_unless(rv == 0);
 	fail_unless(buf[1023] == 'A');
 }
@@ -109,25 +106,25 @@ END_TEST
 
 START_TEST(test_read_name_inf_loop)
 {
-	unsigned char infloop[] = {
+	uint8_t infloop[] = {
 		'A', 'A', 0x81, 0x80, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 		0x01, 'A', 0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01 };
-	char buf[1024];
-	char *data;
-	int rv;
+	uint8_t buf[1024];
+	uint8_t *data;
+	size_t rv;
 
 	memset(buf, 0, sizeof(buf));
-	data = (char*) infloop + sizeof(HEADER);
+	data = infloop + sizeof(HEADER);
 	buf[4] = '\a';
-	rv = readname((char*) infloop, sizeof(infloop), &data, buf, 4);
-	fail_unless(rv == 3);
+	rv = readname(infloop, sizeof(infloop), &data, buf, 4);
+	fail_unless(data - infloop <= sizeof(infloop) && rv == 4);
 	fail_unless(buf[4] == '\a');
 }
 END_TEST
 
 START_TEST(test_read_name_longname)
 {
-	unsigned char longname[] =
+	uint8_t longname[] =
 		"AA\x81\x80\x00\x01\x00\x00\x00\x00\x00\x00"
 		"\x3FzBCDEFGHIJKLMNOPQURSTUVXYZ0123456789abcdefghijklmnopqrstuvxyzAA"
 		"\x3FzBCDEFGHIJKLMNOPQURSTUVXYZ0123456789abcdefghijklmnopqrstuvxyzAA"
@@ -136,52 +133,85 @@ START_TEST(test_read_name_longname)
 		"\x3FzBCDEFGHIJKLMNOPQURSTUVXYZ0123456789abcdefghijklmnopqrstuvxyzAA"
 		"\x3FzBCDEFGHIJKLMNOPQURSTUVXYZ0123456789abcdefghijklmnopqrstuvxyzAA"
 		"\x00\x00\x01\x00\x01";
-	char buf[1024];
-	char *data;
-	int rv;
+	uint8_t buf[1024];
+	uint8_t *data;
+	size_t rv;
 
 	memset(buf, 0, sizeof(buf));
-	data = (char*) longname + sizeof(HEADER);
+	data = longname + sizeof(HEADER);
 	buf[256] = '\a';
-	rv = readname((char*) longname, sizeof(longname), &data, buf, 256);
-	fail_unless(rv == 256);
+	rv = readname(longname, sizeof(longname), &data, buf, 256);
+	fail_unless(data - longname <= sizeof(longname) && rv == 256);
 	fail_unless(buf[256] == '\a');
+}
+END_TEST
+
+START_TEST(test_read_name_invalid)
+{
+	uint8_t invalid[] =
+		"AA\x81\x80\x00\x01\x00\x00\x00\x00\x00\x00"
+		"\x3FzBCDEFGHIJKLMNOPQURSTUVXYZ0123456789abcdefghijklmnopqrstuvxyzAA"
+		"\x3FzBCDEFGHIJKLMNOPQURSTUVXYZ0123456789abcdefghijklmnopqrstuvxyzAA"
+		"\x3Finvalidquerysincethisistoooshort"; // 32 instead of 63
+	uint8_t buf[1024];
+	uint8_t *data, *b;
+	size_t rv;
+	size_t len = sizeof(invalid) - 64;
+
+
+	/* This test uses malloc to cause segfault if readname accesses outside buffer */
+	// resulting hostname can be max. 64*2+32=160 bytes
+	memset(buf, 0, sizeof(buf));
+	b = malloc(sizeof(invalid));
+	if (b) {
+		memcpy(b, invalid, sizeof(invalid));
+		data = b + sizeof(HEADER);
+		buf[160] = '\a';
+		rv = readname(b, sizeof(invalid), &data, buf, 256);
+
+		fail_unless(rv == 160);
+		fail_unless(buf[160] == '\a');
+		fail_unless((data - b) <= sizeof(invalid));
+		free(b);
+	} else {
+		fail("couldn't allocate memory");
+	}
 }
 END_TEST
 
 START_TEST(test_read_name_onejump)
 {
-	unsigned char onejump[] =
+	uint8_t onejump[] =
 		"AA\x81\x80\x00\x01\x00\x00\x00\x00\x00\x00"
 		"\x02hh\xc0\x15\x00\x01\x00\x01\x05zBCDE\x00";
-	char buf[1024];
-	char *data;
-	int rv;
+	uint8_t buf[1024];
+	uint8_t *data;
+	size_t rv;
 
 	memset(buf, 0, sizeof(buf));
-	data = (char*) onejump + sizeof(HEADER);
-	rv = readname((char*) onejump, sizeof(onejump), &data, buf, 256);
-	fail_unless(rv == 9);
+	data = onejump + sizeof(HEADER);
+	rv = readname(onejump, sizeof(onejump), &data, buf, 256);
+	fail_unless(rv == 8);
 }
 END_TEST
 
 START_TEST(test_read_name_badjump_start)
 {
-	unsigned char badjump[] = {
+	uint8_t badjump[] = {
 		'A', 'A', 0x81, 0x80, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 		0xfe, 0xcc, 0x00, 0x01, 0x00, 0x01 };
-	unsigned char *jumper;
-	char buf[1024];
-	char *data;
-	int rv;
+	uint8_t *jumper;
+	uint8_t buf[1024];
+	uint8_t *data;
+	size_t rv;
 
 	/* This test uses malloc to cause segfault if jump is executed */
 	memset(buf, 0, sizeof(buf));
 	jumper = malloc(sizeof(badjump));
 	if (jumper) {
 		memcpy(jumper, badjump, sizeof(badjump));
-		data = (char*) jumper + sizeof(HEADER);
-		rv = readname((char*) jumper, sizeof(badjump), &data, buf, 256);
+		data = jumper + sizeof(HEADER);
+		rv = readname(jumper, sizeof(badjump), &data, buf, 256);
 
 		fail_unless(rv == 0);
 		fail_unless(buf[0] == 0);
@@ -192,25 +222,24 @@ END_TEST
 
 START_TEST(test_read_name_badjump_second)
 {
-	unsigned char badjump2[] = {
+	uint8_t badjump2[] = {
 		'A', 'A', 0x81, 0x80, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 		0x02, 'B', 'A', 0xfe, 0xcc, 0x00, 0x01, 0x00, 0x01 };
-	unsigned char *jumper;
-	char buf[1024];
-	char *data;
-	int rv;
+	uint8_t *jumper;
+	uint8_t buf[1024];
+	uint8_t *data;
+	size_t rv;
 
 	/* This test uses malloc to cause segfault if jump is executed */
 	memset(buf, 0, sizeof(buf));
 	jumper = malloc(sizeof(badjump2));
 	if (jumper) {
 		memcpy(jumper, badjump2, sizeof(badjump2));
-		data = (char*) jumper + sizeof(HEADER);
-		rv = readname((char*) jumper, sizeof(badjump2), &data, buf, 256);
+		data = jumper + sizeof(HEADER);
+		rv = readname(jumper, sizeof(badjump2), &data, buf, 256);
 
-		fail_unless(rv == 4);
-		fail_unless(strcmp("BA.", buf) == 0,
-				"buf is not BA: %s", buf);
+		fail_unless(rv == 3);
+		fail_unless(memcmp("BA.", buf, 3) == 0, "incorrect result from readname");
 	}
 	free(jumper);
 }
@@ -218,57 +247,64 @@ END_TEST
 
 START_TEST(test_putname)
 {
-	char out[] = "\x06" "BADGER\x06" "BADGER\x04" "KRYO\x02" "SE\x00";
-	char buf[256];
-	char *domain = "BADGER.BADGER.KRYO.SE";
-	char *b;
-	int ret;
+	uint8_t out[] = "\x06" "BADGER\x06" "BADGER\x04" "KRYO\x02" "SE\x00";
+	uint8_t buf[256];
+	uint8_t domain[] = "BADGER.BADGER.KRYO.SE";
+	uint8_t *b;
+	size_t ret;
 
 	memset(buf, 0, 256);
 	b = buf;
-	ret = putname(&b, 256, domain);
-
-	fail_unless(ret == strlen(domain) + 1);
-	fail_unless(strncmp(buf, out, ret) == 0, "Happy flow failed");
+	ret = putname(&b, 256, domain, sizeof(domain)-1);
+	/*for (int i = 0; i < ret; i++){
+		fprintf(stderr, "%02x", buf[i]);
+	}
+	fprintf(stderr, " len=%d\n", ret);
+	for (int i = 0; i < sizeof(out); i++){
+		fprintf(stderr, "%02x", out[i]);
+	}
+	fprintf(stderr, " len=%d\n", sizeof(out));*/
+	fail_unless(ret == sizeof(domain) + 1, "len(domain)+1==%u != %u", sizeof(domain) + 1, ret);
+	fail_unless(memcmp(out, buf, MIN(ret, sizeof(out))) == 0, "Happy flow failed");
 }
 END_TEST
 
 START_TEST(test_putname_nodot)
 {
-	char buf[256];
-	char *nodot =
+	uint8_t buf[256];
+	uint8_t nodot[] =
 		"ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWXYZ"
 		"ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWXYZ";
-	char *b;
-	int ret;
+	uint8_t *b;
+	size_t ret;
 
 	memset(buf, 0, 256);
 	b = buf;
-	ret = putname(&b, 256, nodot);
+	ret = putname(&b, 256, nodot, sizeof(nodot));
 
-	fail_unless(ret == -1);
+	fail_unless(ret == 0);
 	fail_unless(b == buf);
 }
 END_TEST
 
 START_TEST(test_putname_toolong)
 {
-	char buf[256];
-	char *toolong =
+	uint8_t buf[256];
+	uint8_t toolong[] =
 		"ABCDEFGHIJKLMNOPQRSTUVWXYZ.ABCDEFGHIJKLMNOPQRSTUVWXYZ."
 		"ABCDEFGHIJKLMNOPQRSTUVWXYZ.ABCDEFGHIJKLMNOPQRSTUVWXYZ."
 		"ABCDEFGHIJKLMNOPQRSTUVWXYZ.ABCDEFGHIJKLMNOPQRSTUVWXYZ."
 		"ABCDEFGHIJKLMNOPQRSTUVWXYZ.ABCDEFGHIJKLMNOPQRSTUVWXYZ."
 		"ABCDEFGHIJKLMNOPQRSTUVWXYZ.ABCDEFGHIJKLMNOPQRSTUVWXYZ."
 		"ABCDEFGHIJKLMNOPQRSTUVWXYZ.ABCDEFGHIJKLMNOPQRSTUVWXYZ.";
-	char *b;
-	int ret;
+	uint8_t *b;
+	size_t ret;
 
 	memset(buf, 0, 256);
 	b = buf;
-	ret = putname(&b, 256, toolong);
+	ret = putname(&b, 256, toolong, sizeof(toolong));
 
-	fail_unless(ret == -1);
+	fail_unless(ret == 0);
 	fail_unless(b == buf);
 }
 END_TEST
@@ -286,6 +322,7 @@ test_read_create_tests()
 	tcase_add_test(tc, test_read_name_empty_loop);
 	tcase_add_test(tc, test_read_name_inf_loop);
 	tcase_add_test(tc, test_read_name_longname);
+	tcase_add_test(tc, test_read_name_invalid);
 	tcase_add_test(tc, test_read_name_onejump);
 	tcase_add_test(tc, test_read_name_badjump_start);
 	tcase_add_test(tc, test_read_name_badjump_second);
