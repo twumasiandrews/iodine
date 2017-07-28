@@ -28,6 +28,7 @@ Changes from 00000800 to 00000801:
 	0-9	Data packet
 	A-F	Data packet
 	I	IP address
+	K	Connection request
 	L	Login
 	N	Downstream fragsize	(NS.topdomain A-type reply)
 	O	Options
@@ -36,17 +37,18 @@ Changes from 00000800 to 00000801:
 	S	Switch upstream codec
 	V	Version
 	W				(WWW.topdomain A-type reply)
-	Y	Downstream codec check
-	Z	Upstream codec check
+	Y	Downstream codec check (DEPRECATED)
+	Z	Upstream codec check (DEPRECATED)
 
 CMC = Cache Miss Counter, increased every time it is used
 
----------------------------------------
-1.2 Unauthenticated packets (pre-login)
----------------------------------------
+----------------------------------------------------------------------
+1.2 Unauthenticated commands (pre-login), backwards compatibility only
+----------------------------------------------------------------------
 
-Note: These packets are backwards-compatible with previous versions of iodine,
-at least to protocol version 00000402.
+Note: These commands are backwards-compatible with previous versions of iodine,
+at least to protocol version 00000402. To increase security the function of
+
 
 Upstream codec check / bounce:
 Client sends:
@@ -110,14 +112,7 @@ Client sends (length 2+36):
 	16 bytes client login challenge
 Server replies (length 31):
 	BADAUTH if bad login
-	4 bytes server IPv4 address (network byte order)
-	4 bytes client IPv4 address (network byte order)
-	2 bytes MTU (network byte order)
-	1 byte netmask bits (like CIDR)
 	16 bytes hash of password + client login challenge
-If the requested UDP forwarding options are not accepted by the server, the
-response is simply LNAK.
-
 
 The login process is outlined as follows:
 	1. Successful version check; server provides a 16-byte login challenge to
@@ -134,41 +129,43 @@ The login process is outlined as follows:
 1.4 Authenticated packets (after login complete)
 ------------------------------------------------
 
-IP Request: (for where to try raw login)
-Client sends (2+16):
-	First byte i or I
-	1 byte userid char (hex)
-	Rest encoded in base32:
-	4 bytes CMC
-	12 bytes HMAC
-Server replies:
-	BADAUTH if bad authentication
-	1 byte length of IP address
-	Then comes external IP address of iodined server
-	as 4 bytes (IPv4) or 16 bytes (IPv6)
+Command I: IP Request (for where to try raw login) (len=0)
+	(no command-specific data)
+Server replies (len=5-17):
+	1 byte length of IP address (4 or 16)
+	4 bytes (IPv4) or 16 bytes (IPv6) external IP address of server
 
-Switch upstream codec:
-Client sends (2+16+1):
-	First byte s or S
-	1 byte userid char (hex)
-	rest encoded in base32:
-	4 bytes CMC
-	12 bytes HMAC
+
+Command K: Request data connection (UDP forward or TUN IP)
+	1 byte connection mode flags:
+	    +76543210+	T flag: request TUN IP
+	    |0000URIT|	URI = UDP forward flags
+	    +--------+
+	0-2 bytes remote UDP port (network byte order): 0 bytes if URI=0XX,
+		2 bytes if URI=1XX
+	0-16 bytes remote IP address: 0 bytes if URI=100, 4 bytes if URI=110 (IPv4)
+		or 16 bytes if URI=111 (IPv6)
+Server replies:
+	BADOPTS if not accepted, no data follows
+	1 byte copy of connection mode flags
+	4 bytes server IPv4 address (network byte order)
+	4 bytes client IPv4 address (network byte order)
+	2 bytes MTU (network byte order)
+	1 byte netmask bits (like CIDR)
+	
+	If UDP forwarding enabled, the client will no longer receive data from the
+	server's TUN device.
+
+
+Command S: Switch upstream codec (len=1)
 	1 byte codec type (see codec types in section "Query and response format")
 Server sends:
-	BADCODEC if not accepted. Client must then revert to previous codec
-	BADLEN if length of query is too short
-	BADAUTH if bad auth
-	1 byte codec type if accepted (After this all upstream data packets
-		must be encoded with the new codec.)
+	BADOPTS if not accepted. Client must then revert to previous codec
+	1 byte codec type if accepted
+	After this command all upstream data packets must be encoded with the new codec.
 
-Set Options:
-Client sends (len 2+16+(1-19)):
-	First byte o or O
-	1 byte userid char (hex)
-	rest encoded in base32:
-    4 bytes CMC
-    12 bytes HMAC
+
+Command O: Set options (len 1)
 	1 byte option flags:
     +76543210+
     |URILKCCC|
@@ -177,12 +174,9 @@ Client sends (len 2+16+(1-19)):
 		2 bytes if URI=1XX
 	0-16 bytes remote IP address: 0 bytes if URI=100, 4 bytes if URI=110 (IPv4)
 		or 16 bytes if URI=111 (IPv6)
-	 
 Server sends:
-	BADCODEC if not accepted. Previous situation remains.
-	BADAUTH if bad auth
+	BADOPTS if options rejected. Previous situation remains.
 	1 byte = flag byte sent by client if all options accepted
-	
 Option flags:
 	U: UDP forward enabled
 	R: Remote IP address is NOT localhost
@@ -203,36 +197,24 @@ Option flags:
 	received from that same IP/port back to the client.
 
 
-Probe downstream fragment size:
-Client sends (len 2+16+2+data):
-	First byte r or R
-	1 byte userid char (hex)
-	Rest encoded as base32:
-	4 bytes CMC
-	12 bytes HMAC
+Command R: Probe downstream fragment size (len=2+...)
 	2 bytes fragsize (network byte order)
 	Then follows a long random query which contents does not matter.
-Server sends:
-	BADFRAG if requested length not accepted.
-	BADAUTH if bad auth
+Server sends (len=3+fragsize-16):
+	BADOPTS if requested length not accepted.
 	2 bytes requested fragsize (network byte order)
 	1 byte random "seed"
 	Following is (fragsize-16) bytes of data, starting with the random seed,
 	and each following byte is incremented with 107.
 	This is checked by the client to determine corruption.
 
-Set downstream fragment size:
-Client sends (len 2+16+2):
-	First byte n or N
-	1 byte userid char (hex)
-	Rest encoded with base32:
-    4 bytes CMC
-    12 bytes HMAC
+
+Command N: Set downstream fragsize (len=2)
 	2 bytes new downstream fragment size (network byte order)
-Server sends:
-	BADFRAG if not accepted.
+Server sends (len 2):
+	BADOPTS if not accepted.
 	2 bytes new downstream fragment size. After this all downstream
-	payloads will be max (fragsize + 2) bytes long.
+	payloads will be max fragsize bytes long.
 
 --------------------------
 1.5 Data packets and pings
@@ -275,16 +257,10 @@ containing upstream and downstream window sizes and window start sequence IDs.
 The response does not need to contain data. If the server has no data to send,
 the response will always include the ping header and the ping flag will be set.
 
-Ping:
-Client sends (len 2+16+9):
-	First byte p or P
-	1 byte userid char (hex)
-	Rest encoded with Base32:
-    4 bytes CMC
-    12 bytes HMAC
-    0.......7 12
+Command P: Ping / control message (len=9)
+    0.......7 8
     +--------+76543210+
-    |WWWWSSDD|000WT00R|
+    |WWWWSSDD|00000WTR|
     +--------+--------+
 	1 byte window size (upstream)
 	1 byte window size (downstream)
@@ -320,7 +296,20 @@ In NULL and PRIVATE responses, downstream data (anything returned from the
 server, not just data packets) is always raw. In all other response types,
 downstream data is encoded (see Options above).
 
-Downstream response header is as follows:
+All post-authentication commands have same query hostname structure. Note that
+data packets are different (see Upstream data header above).
+Client sends (length 2+16+...):
+	1 byte cmd char (case insensitive)
+	1 byte userid char (hexadecimal [0-9a-fA-F])
+	Rest encoded in base32:
+	4 bytes CMC
+	12 bytes HMAC
+	<command-specific data follows>
+Standard server replies are as follows (including data):
+	BADLEN (if packet length is invalid, ie. too short)
+	BADAUTH (if user id/HMAC/CMC is invalid)
+	(other error codes are command specific)
+	
 	1 char base32-encoded flags:
 	 +98765+   H    = 0: HMAC is 96-bit, 1: 32-bit
 	 |HECCC|   CCC  = Codec type (0-7)
@@ -328,7 +317,7 @@ Downstream response header is as follows:
 	Rest encoded with specified codec:
 	4 bytes CMC (network byte order) (random for pre-login responses)
 	4 or 12 bytes HMAC (note: HMAC field is 32-bits random for all pre-login responses)
-	(data follows)
+	<command-specific data follows>
 
 Encoding is determined by value of codec field and response type.
 TXT response type:
@@ -351,11 +340,9 @@ Codec field values:
 	0x0: raw      (\000-\377)
 Error codes:
 	0x0: BADLEN (packet below minimum length, maybe truncated)
-	0x1: BADHMAC (HMAC does not match, packet was rejected)
-	0x2: BADUSER (user session has timed out)
-	0x3: BADCODEC (codec not accepted by server)
-	0x4: BADFRAG (frag len not accepted by server)
-	0x5: BADLOGIN (LNAK: login not accepted)
+	0x1: BADAUTH (invalid authentication/HMAC/CMC)
+	0x2: BADOPTS (options not accepted by server)
+	0x3: BADLOGIN (LNAK: login not accepted)
 
 Protocol security
 =================
