@@ -64,6 +64,7 @@
 #include "window.h"
 #include "util.h"
 #include "client.h"
+#include "hmac_md5.h"
 
 int
 client_set_qtype(char *qtype)
@@ -371,8 +372,8 @@ send_query(uint8_t *hostname)
 	q.id = this.lastid;
 	q.type = this.do_qtype;
 
-	len = dns_encode((char *)packet, sizeof(packet), &q,
-			QR_QUERY, (char *)hostname, strlen((char *)hostname));
+	len = dns_encode(packet, sizeof(packet), &q,
+			QR_QUERY, hostname, strlen(hostname));
 	if (len < 1) {
 		warnx("dns_encode doesn't fit");
 		return -1;
@@ -459,41 +460,40 @@ send_raw_data(uint8_t *data, size_t datalen)
 static int
 send_packet(char cmd, const uint8_t *rawdata, const size_t rawdatalen, const int hmaclen)
 /* Base32 encodes data and sends as single DNS query
- * cmd becomes first byte of query, followed by hex userid, encoded
- * data and 4 bytes base32 encoded CMC
  * Returns ID of sent query */
 {
-	uint8_t buf[512], data[rawdatalen + 4 + hmaclen], hmac[16];
+	uint32_t len = rawdatalen + hmaclen + 6;
+	uint8_t buf[512], data[len + 4], hmac[16];
 
 	if (rawdata && rawdatalen) {
-		memcpy(data + 4 + hmaclen, rawdata, rawdatalen);
+		memcpy(data + 8 + hmaclen, rawdata, rawdatalen);
 	}
-	*(uint32_t *) data = htonl(CMC(this.cmc_up));
+
+	*(uint32_t *) (data + 4) = htonl(CMC(this.cmc_up));
 
 	buf[0] = cmd;
 	buf[1] = this.userid_char;
 
 	if (hmaclen) {
 		/* calculate HMAC as specified in doc/proto_00000801.txt
-		 * section "Protocol security" */
-		/*	1. The packet is prepared (assembled in case of sending, decoded to the point
-				where the HMAC field is available in case of receiving).
-			2. The HMAC field is set to 0 (since it is included in the data to be signed,
-				but at the same time cannot sign itself).
-			3. The userid byte is XORed with the first byte of the decoded data.
-			4. The command byte (if present) is XORed with the 2nd byte of decoded data.
-			5. The HMAC is calculated using the decoded data and decoded data length.
-			6. Receiving: the calculated HMAC is compared to the value in the original packet.
-				Sending: the calculated HMAC is inserted into the HMAC field, and the raw
-				data is encoded as necessary. */
-		memset(data + 4, 0, hmaclen);
-		data[0] ^= this.userid_char;
-		data[1] ^= tolower(cmd);
-		hmac_md5(hmac, this.hmac_key, 16, data, sizeof(data));
-		memcpy(data + 4, hmac, hmaclen);
+		 * section "Protocol security"
+		1. Packet data and header is assembled (data is not encoded yet).
+		2. HMAC field is set to 0.
+		3. Data to be encoded is appended to string (ie. cmd + userid chars) at
+			beginning of query name.
+		4. Length (32 bits, network byte order) is prepended to the result from (3)
+			Length = (len of chars at start of query) + (len of raw data)
+		5. HMAC is calculated using the output from (4) and inserted into the HMAC
+			field in the data header. The data is then encoded (ie. base32 + dots)
+			and the query is sent. */
+		*(uint32_t *) data = htonl(len);
+		memcpy(data + 4, buf, 2);
+		memset(data + 10, 0, hmaclen);
+		hmac_md5(hmac, this.hmac_key, 16, data, len + 4);
+		memcpy(data + 10, hmac, hmaclen);
 	}
 
-	build_hostname(buf, sizeof(buf), data, sizeof(data),
+	build_hostname(buf, sizeof(buf), data + 6, len - 2,
 				   this.topdomain, b32, this.hostname_maxlen, 2);
 
 	return send_query(buf);
@@ -754,26 +754,23 @@ read_dns_withq(uint8_t *buf, size_t buflen, struct query *q)
 */
 {
 	struct sockaddr_storage from;
-	uint8_t data[64*1024];
+	uint8_t pkt[64*1024];
 	socklen_t addrlen;
-	int r;
+	int pktlen;
 
 	addrlen = sizeof(from);
-	if ((r = recvfrom(this.dns_fd, data, sizeof(data), 0,
-			  (struct sockaddr*)&from, &addrlen)) < 0) {
+	if ((pktlen = recvfrom(this.dns_fd, pkt, sizeof(pkt), 0,
+			  (struct sockaddr*)&from, &addrlen)) <= 0) {
 		warn("recvfrom");
-		return -1;
+		return pktlen;
 	}
 
 	if (this.conn == CONN_DNS_NULL) {
-		int rv;
-		if (r <= 0)
-			/* useless packet */
-			return 0;
-
-		rv = dns_decode((char *)buf, buflen, q, QR_ANSWER, (char *)data, r);
-		if (rv <= 0)
-			return rv;
+		int hostlen;
+		hostlen = dns_decode((char *)buf, buflen, q, QR_ANSWER, (char *)pkt, pktlen);
+		if (hostlen <= 0) {
+			return hostlen;
+		}
 
 		if (q->type == T_CNAME || q->type == T_TXT ||
 			q->type == T_PTR || q->type == T_A6 || q->type == T_DNAME)
@@ -788,15 +785,15 @@ read_dns_withq(uint8_t *buf, size_t buflen, struct query *q)
 			 * data is unused here, and will certainly hold the smaller binary
 			 */
 
-			rv = dns_namedec(data, sizeof(data), buf, rv);
+			hostlen = dns_namedec(pkt, sizeof(pkt), buf, hostlen);
 
-			rv = MIN(rv, buflen);
-			if (rv > 0)
-				memcpy(buf, data, rv);
+			hostlen = MIN(hostlen, buflen);
+			if (hostlen > 0)
+				memcpy(buf, pkt, hostlen);
 
 		} else if (q->type == T_MX || q->type == T_SRV) {
 			/* buf is like "Hname.com\0Hanother.com\0\0" */
-			int buftotal = rv;	/* idx of last \0 */
+			int buftotal = hostlen;	/* idx of last \0 */
 			int bufoffset = 0;
 			int dataoffset = 0;
 			int thispartlen, dataspace, datanew;
@@ -804,11 +801,11 @@ read_dns_withq(uint8_t *buf, size_t buflen, struct query *q)
 			while (1) {
 				thispartlen = strlen((char *)buf);
 				thispartlen = MIN(thispartlen, buftotal-bufoffset);
-				dataspace = sizeof(data) - dataoffset;
+				dataspace = sizeof(pkt) - dataoffset;
 				if (thispartlen <= 0 || dataspace <= 0)
 					break;
 
-				datanew = dns_namedec(data + dataoffset, dataspace,
+				datanew = dns_namedec(pkt + dataoffset, dataspace,
 						      buf + bufoffset, thispartlen);
 				if (datanew <= 0)
 					break;
@@ -816,40 +813,40 @@ read_dns_withq(uint8_t *buf, size_t buflen, struct query *q)
 				bufoffset += thispartlen + 1;
 				dataoffset += datanew;
 			}
-			rv = dataoffset;
-			rv = MIN(rv, buflen);
-			if (rv > 0)
-				memcpy(buf, data, rv);
+			hostlen = dataoffset;
+			hostlen = MIN(hostlen, buflen);
+			if (hostlen > 0)
+				memcpy(buf, pkt, hostlen);
 		}
 
-		DEBUG(2, "RX: id %5d name[0]='%c'", q->id, q->name[0]);
+		DEBUG(2, "RX: id %5d name[0]='%c' len=%" L "u", q->id, q->name[0], hostlen);
 
-		return rv;
+		return hostlen;
 	} else { /* CONN_RAW_UDP */
 		size_t datalen;
 		uint8_t buf[64*1024];
 
 		/* minimum length */
-		if (r < RAW_HDR_LEN)
+		if (pktlen < RAW_HDR_LEN)
 			return 0;
 		/* should start with header */
-		if (memcmp(data, raw_header, RAW_HDR_IDENT_LEN))
+		if (memcmp(pkt, raw_header, RAW_HDR_IDENT_LEN))
 			return 0;
 		/* should be my user id */
-		if (RAW_HDR_GET_USR(data) != this.userid)
+		if (RAW_HDR_GET_USR(pkt) != this.userid)
 			return 0;
 
-		if (RAW_HDR_GET_CMD(data) == RAW_HDR_CMD_DATA ||
-		    RAW_HDR_GET_CMD(data) == RAW_HDR_CMD_PING)
+		if (RAW_HDR_GET_CMD(pkt) == RAW_HDR_CMD_DATA ||
+		    RAW_HDR_GET_CMD(pkt) == RAW_HDR_CMD_PING)
 			this.lastdownstreamtime = time(NULL);
 
 		/* should be data packet */
-		if (RAW_HDR_GET_CMD(data) != RAW_HDR_CMD_DATA)
+		if (RAW_HDR_GET_CMD(pkt) != RAW_HDR_CMD_DATA)
 			return 0;
 
-		r -= RAW_HDR_LEN;
+		pktlen -= RAW_HDR_LEN;
 		datalen = sizeof(buf);
-		if (uncompress(buf, &datalen, data + RAW_HDR_LEN, r) == Z_OK) {
+		if (uncompress(buf, &datalen, pkt + RAW_HDR_LEN, pktlen) == Z_OK) {
 			write_tun(this.tun_fd, buf, datalen);
 		}
 
@@ -1768,9 +1765,8 @@ static int
 handshake_raw_udp()
 {
 	struct timeval tv;
-	char in[4096];
+	uint8_t in[4096];
 	fd_set fds;
-	int i;
 	int r;
 	int len;
 	int got_addr;
@@ -1781,7 +1777,7 @@ handshake_raw_udp()
 	got_addr = 0;
 
 	fprintf(stderr, "Testing raw UDP data to the server (skip with -r)");
-	for (i=0; this.running && i<3 ;i++) {
+	for (int i = 0; this.running && i < 3; i++) {
 
 		send_ip_request();
 
@@ -1825,7 +1821,7 @@ handshake_raw_udp()
 	/* do login against port 53 on remote server
 	 * based on the old seed. If reply received,
 	 * switch to raw udp mode */
-	for (i=0; this.running && i<4 ;i++) {
+	for (int i = 0; this.running && i < 4; i++) {
 		tv.tv_sec = i + 1;
 		tv.tv_usec = 0;
 
