@@ -23,9 +23,15 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-/* TODO allow raw-encoded hostnames */
+#include "read.h"
+#include "dns.h"
+
 size_t
-readname_loop(uint8_t *packet, size_t packetlen, uint8_t **src, uint8_t *dst, size_t length, size_t loop)
+readname_loop(uint8_t *packet, size_t packetlen, uint8_t **src, uint8_t *dst,
+		size_t length, size_t loop, int bin, int raw)
+/* bin: treat decoded data as binary (do not insert dots)
+ * raw: validate and return the "hostname" without modification (does not
+ * expand compressed labels but instead returns) */
 {
 	uint8_t *dummy, *s, *d;
 	size_t len, offset;
@@ -39,9 +45,16 @@ readname_loop(uint8_t *packet, size_t packetlen, uint8_t **src, uint8_t *dst, si
 	d = dst;
 	while(*s && len < length - 1) {
 		labellen = *s++;
+		if (raw) {
+			*d++ = labellen;
+		}
 
 		/* is this a compressed label? */
 		if((labellen & 0xc0) == 0xc0) {
+			if (raw) { /* do not follow link, instead copy to dst */
+				*d++ = *s;
+				goto end;
+			}
 			offset = (((labellen & 0x3f) << 8) | (*s++ & 0xff));
 			if (offset > packetlen) {
 				if (len == 0) {
@@ -53,7 +66,7 @@ readname_loop(uint8_t *packet, size_t packetlen, uint8_t **src, uint8_t *dst, si
 				}
 			}
 			dummy = packet + offset;
-			len += readname_loop(packet, packetlen, &dummy, d, length - len, loop - 1);
+			len += readname_loop(packet, packetlen, &dummy, d, length - len, loop - 1, bin, 0);
 			goto end;
 		} else if ((labellen & 0xc0) != 0) {
 			/* invalid hostname, abort */
@@ -70,7 +83,7 @@ readname_loop(uint8_t *packet, size_t packetlen, uint8_t **src, uint8_t *dst, si
 			break; /* We used up all space */
 		}
 
-		if (*s != 0) {
+		if (!bin && *s != 0) {
 			*d++ = '.';
 			len++;
 		}
@@ -82,13 +95,18 @@ end:
 }
 
 size_t
-readname(uint8_t *packet, size_t packetlen, uint8_t **src, uint8_t *dst, size_t length)
+readname(uint8_t *packet, size_t packetlen, uint8_t **src, uint8_t *dst, size_t length, int bin, int raw)
+/* reads DNS hostname (length-prefixed labels)
+ * if bin==0, result is human readable hostname (with dots)
+ * bin==1: hostname is returned without dots (binary data)
+ * if raw: hostname is returned without being decoded, labels are not expanded */
 {
-	return readname_loop(packet, packetlen, src, dst, length, 10);
+	return readname_loop(packet, packetlen, src, dst, length, 10, bin, raw);
 }
 
 size_t
 readshort(uint8_t *packet, uint8_t **src, uint16_t *dst)
+/* reads network byte order short and converts to host byte order */
 {
 	uint8_t *p;
 
@@ -101,6 +119,7 @@ readshort(uint8_t *packet, uint8_t **src, uint16_t *dst)
 
 size_t
 readlong(uint8_t *packet, uint8_t **src, uint32_t *dst)
+/* reads network byte order 32-bit long and converts to host byte order */
 {
 	/* A long as described in dns protocol is always 32 bits */
 	uint8_t *p;
@@ -156,7 +175,10 @@ readtxtbin(uint8_t *packet, uint8_t **src, size_t srcremain, uint8_t *dst, size_
 }
 
 size_t
-putname(uint8_t **buf, size_t buflen, uint8_t *host, size_t hostlen)
+putname(uint8_t **buf, size_t buflen, uint8_t *host, size_t hostlen, int bin)
+/* puts DNS hostname to *buf as series of len-prefixed DNS labels
+ * if bin==1, host is treated as binary data and labels are added
+ * when needed. Otherwise labels correspond to dots in host. */
 {
 	uint8_t *p, *labelprefix, *h;
 	size_t len = 0, total = 0, hpos = 0;
@@ -166,8 +188,10 @@ putname(uint8_t **buf, size_t buflen, uint8_t *host, size_t hostlen)
 	p++;
 
 	while (1) {
-		if (*h == '.' || hpos >= hostlen) {
-			h++;
+		if (((*h == '.' && !bin) || (len == DNS_MAXLABEL && bin)) || hpos >= hostlen) {
+			if (!bin) {
+				h++;
+			}
 			*labelprefix = (uint8_t) len & 0x3F;
 			labelprefix = p++;
 			len = 0; /* start next label */
@@ -176,7 +200,7 @@ putname(uint8_t **buf, size_t buflen, uint8_t *host, size_t hostlen)
 			len++;
 		}
 
-		if (len >= 63 || total >= buflen) {
+		if (len > 63 || total >= buflen) {
 			/* invalid hostname or buffer too small */
 			return 0;
 		}
@@ -204,6 +228,7 @@ putbyte(uint8_t **dst, uint8_t value)
 
 size_t
 putshort(uint8_t **dst, uint16_t value)
+/* put host order 16-bit short in network byte order */
 {
 	uint8_t *p;
 
@@ -218,6 +243,7 @@ putshort(uint8_t **dst, uint16_t value)
 
 size_t
 putlong(uint8_t **dst, uint32_t value)
+/* put host order 32-bit long in network byte order */
 {
 	/* A long as described in dns protocol is always 32 bits */
 	uint8_t *p;
