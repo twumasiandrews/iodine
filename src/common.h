@@ -66,11 +66,9 @@ extern const unsigned char raw_header[RAW_HDR_LEN];
 
 /* Error codes */
 #define E_BADLEN	0x0
-#define E_BADHMAC	0x1
-#define E_BADUSER	0x2
-#define E_BADCODEC	0x3
-#define E_BADFRAG	0x4
-#define E_BADLOGIN	0x5
+#define E_BADAUTH	0x1
+#define E_BADOPTS	0x2
+#define E_BADLOGIN	0x3
 
 #ifdef WINDOWS32
 #include "windows.h"
@@ -82,6 +80,8 @@ extern const unsigned char raw_header[RAW_HDR_LEN];
 #include <arpa/inet.h>
 #include <sys/time.h>
 #endif
+
+#include "dns.h"
 
 #define DNS_PORT 53
 
@@ -118,8 +118,6 @@ extern const unsigned char raw_header[RAW_HDR_LEN];
 #define MAX(a,b) ((a)>(b)?(a):(b))
 #endif
 
-#define QUERY_NAME_SIZE 256
-
 #if defined IP_MTU_DISCOVER
   /* Linux */
 # define IP_OPT_DONT_FRAG IP_MTU_DISCOVER
@@ -137,11 +135,6 @@ extern const unsigned char raw_header[RAW_HDR_LEN];
 #ifndef GITREVISION
 #define GITREVISION "GIT"
 #endif
-
-#define T_PRIVATE 65399
-/* Undefined RR type; "private use" range, see http://www.bind9.net/dns-parameters */
-#define T_UNSET 65432
-/* Unused RR type, never actually sent */
 
 #define DOWNSTREAM_HDR_R	17
 #define DOWNSTREAM_DATA_HDR	3
@@ -176,16 +169,18 @@ extern const unsigned char raw_header[RAW_HDR_LEN];
 #endif
 
 
+// TODO replace struct query with struct dns_packet
 struct query {
-	char name[QUERY_NAME_SIZE];
-	unsigned short type;
-	unsigned short rcode;
-	int id;	/* id < 0: unusued */
 	struct sockaddr_storage destination;
-	socklen_t dest_len;
 	struct sockaddr_storage from;
-	socklen_t fromlen;
+	uint8_t name[QUERY_NAME_SIZE];
 	struct timeval time_recv;
+	size_t len;
+	socklen_t dest_len;
+	socklen_t fromlen;
+	int id;	/* id < 0: unusued */
+	uint16_t type;
+	uint16_t rcode;
 };
 
 enum connection {
