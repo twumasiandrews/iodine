@@ -65,6 +65,8 @@ struct dns_rr {
 struct dns_packet {
 	struct dns_question *q; /* array of QDCOUNT queries */
 	struct dns_rr *an; /* array of ANCOUNT answer RRs */
+	struct dns_rr *ns; /* array of NSCOUNT NS authority RRs */
+	struct dns_rr *ar; /* array of ARCOUNT additional RRs */
 	struct sockaddr_storage dest;
 	struct sockaddr_storage from;
 	struct timeval time_recv;
@@ -74,13 +76,8 @@ struct dns_packet {
 	uint16_t rcode;
 	uint16_t qdcount;
 	uint16_t ancount;
-
-#if 0
-	struct dns_rr *ns; /* array of NSCOUNT NS authority RRs */
-	struct dns_rr *ar; /* array of ARCOUNT additional RRs */
 	uint16_t nscount;
 	uint16_t arcount;
-#endif
 };
 
 #include "common.h"
@@ -91,8 +88,8 @@ struct dns_packet *dns_packet_create(uint16_t qdcount, uint16_t ancount);
 void dns_packet_destroy(struct dns_packet *p);
 
 int dns_encode(uint8_t *buf, size_t *buflen, struct dns_packet *data);
-int dns_encode_ns_response(uint8_t *buf, size_t buflen, struct query *q, uint8_t *topdomain);
-int dns_encode_a_response(uint8_t *buf, size_t buflen, struct query *q);
+size_t dns_encode_ns_response(uint8_t *buf, size_t buflen, struct dns_packet *q, char *topdomain);
+size_t dns_encode_a_response(uint8_t *buf, size_t buflen, struct dns_packet *q);
 unsigned short dns_get_id(uint8_t *packet, size_t packetlen);
 struct dns_packet *dns_decode(uint8_t *, size_t *);
 
