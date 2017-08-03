@@ -33,8 +33,6 @@
 #include "util.h"
 #include "window.h"
 
-int window_debug = 0;
-
 struct frag_buffer *
 window_buffer_init(size_t length, unsigned windowsize, unsigned maxfraglen, int dir)
 {

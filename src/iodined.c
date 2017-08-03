@@ -361,7 +361,7 @@ main(int argc, char **argv)
 			help();
 			break;
 		case 'D':
-			server.debug++;
+			debug++;
 			break;
 		case 'u':
 			username = optarg;
@@ -478,8 +478,8 @@ main(int argc, char **argv)
 		fprintf(stderr, "You must manually forward port 53 to port %d for things to work.\n", server.port);
 	}
 
-	if (server.debug) {
-		fprintf(stderr, "Debug level %d enabled, will stay in foreground.\n", server.debug);
+	if (debug) {
+		fprintf(stderr, "Debug level %d enabled, will stay in foreground.\n", debug);
 		fprintf(stderr, "Add more -D switches to set higher debug level.\n");
 		foreground = 1;
 	}

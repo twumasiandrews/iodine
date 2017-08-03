@@ -37,7 +37,6 @@ struct client_instance {
 	int raw_mode;			/* enable raw UDP mode */
 	int autodetect_server_timeout;
 	int autodetect_delay_variance;
-	int debug;		/* enable debug level */
 	int stats;		/* enable stats printout every # seconds */
 	int running;	/* always == 1 unless shutting down */
 	int connected;	/* connection is established after login successful */
@@ -54,7 +53,7 @@ struct client_instance {
 	int current_nameserver;
 	struct sockaddr_storage raw_serv;
 	int raw_serv_len;
-	char *topdomain;
+	uint8_t *topdomain; /* topdomain in DNS-encoded form */
 
 	/* Remote TCP forwarding stuff (for -R) */
 	struct sockaddr_storage remote_forward_addr;

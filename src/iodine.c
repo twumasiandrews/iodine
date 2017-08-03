@@ -497,7 +497,7 @@ main(int argc, char **argv)
 			foreground = 1;
 			break;
 		case 'D':
-			this.debug++;
+			debug++;
 			break;
 		case 'h':
 			help();
@@ -626,8 +626,8 @@ main(int argc, char **argv)
 	argc -= optind;
 	argv += optind;
 
-	if (this.debug) {
-		fprintf(stderr, "Debug level %d enabled, will stay in foreground.\n", this.debug);
+	if (debug) {
+		fprintf(stderr, "Debug level %d enabled, will stay in foreground.\n", debug);
 		fprintf(stderr, "Add more -D switches to set higher debug level.\n");
 		foreground = 1;
 	}

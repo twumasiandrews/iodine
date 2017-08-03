@@ -63,7 +63,9 @@ extern int window_debug;
 
 /* Window debugging macro */
 #ifdef DEBUG_BUILD
-#define WDEBUG(...) if (window_debug) {\
+#define WDEBUG_LEVEL 2
+#define WDEBUG(...) \
+	if (debug >= WDEBUG_LEVEL) {\
 		TIMEPRINT("[WDEBUG:%s] (%s:%d) ", w->direction == WINDOW_SENDING ? "S" : "R", __FILE__, __LINE__);\
 		fprintf(stderr, __VA_ARGS__);\
 		fprintf(stderr, "\n");\
