@@ -100,10 +100,11 @@ dns_packet_create(uint16_t qdcount, uint16_t ancount, uint16_t nscount, uint16_t
 #define CHECKLEN(x) if (sizeof(qs->name) < (x) + p-qs->name) return 0
 
 struct dns_packet *
-dns_encode_data_query(uint16_t qtype, char *td, uint8_t *data, size_t datalen)
-/* encode (possibly binary) data as DNS labels and fill dns_packet structure */
+dns_encode_data_query(uint16_t qtype, uint8_t *td, uint8_t *data, size_t datalen)
+/* encode (possibly binary) data as DNS labels and fill dns_packet structure
+ * topdomain must be DNS-encoded (len-prefixed labels, uncompressed) */
 {
-	struct dns_packet *q = dns_packet_create(1, 0);
+	struct dns_packet *q = dns_packet_create(1, 0, 0, 0);
 	if (!q)
 		return NULL;
 
@@ -114,53 +115,60 @@ dns_encode_data_query(uint16_t qtype, char *td, uint8_t *data, size_t datalen)
 	q->rcode = NOERROR;
 
 	uint8_t *p = qs->name;
-	CHECKLEN(DNS_HOSTLEN(datalen) + strlen(td) - 1);
+	CHECKLEN(DNS_HOSTLEN(datalen) + strlen(td));
 	size_t hostlen = putname(&p, sizeof(qs->name), data, datalen, 1) - 1;
 
 	/* overwrite root label with topdomain */
 	p--;
-	hostlen += putname(&p, sizeof(qs->name) - hostlen, td, strlen(td), 0);
+	hostlen += putdata(&p, (uint8_t *) td, strlen(td) + 1);
 	qs->namelen = hostlen;
 	return q;
 }
+#undef CHECKLEN
 
 #define CHECKLEN(x, ann) if (sizeof(q->an[ann].rdata) < (x) + (p-q->an[ann].rdata)) return 0
 
-int
-dns_encode_data_answer(struct dns_packet *q, uint8_t *data, size_t datalen)
+struct dns_packet *
+dns_encode_data_answer(struct dns_packet *qu, uint8_t *data, size_t datalen)
 /* encodes (possibly binary) data into query q using whichever
  * RR types are applicable to the question type
  * returns 0 on failure, 1 on success
  * note: q is modified */
 {
-	if (q->qdcount == 0 || q->ancount != 0 || q->qr != QR_QUERY) {
+	if (qu->qdcount == 0 || qu->qr != QR_QUERY) {
 		/* we need a question */
 		return 0;
 	}
 
-	q->qr = QR_ANSWER;
+	struct dns_packet *q;
 
 	/* determine anstype + number of RRs to be encoded */
-	q->ancount = 1;
-	uint16_t type = q->q[0].type;
+	uint16_t ancount = 1;
+	uint16_t type = qu->q[0].type;
 	uint16_t anstype = type;
 	if (type == T_A || type == T_AAAA) {
 		anstype = T_CNAME;
 	} else if (type == T_MX) {
-		q->ancount = datalen / (DNS_MAX_HOST_DATA - 2) + 1;
+		ancount = datalen / (DNS_MAX_HOST_DATA - 2) + 1;
 	} else if (type == T_SRV) {
-		q->ancount = datalen / (DNS_MAX_HOST_DATA - 6) + 1;
+		ancount = datalen / (DNS_MAX_HOST_DATA - 6) + 1;
 	}
 
-	if (q->an)
-		free(q->an);
-	q->an = calloc(q->ancount, sizeof(struct dns_rr));
+	if ((q = dns_packet_create(1, ancount, 0, 0)) == NULL) {
+		return NULL;
+	}
+
+	q->id = qu->id;
+	q->qr = QR_ANSWER;
+
+	memcpy(&q->q[0], &qu->q[0], sizeof(struct dns_question));
 
 	uint8_t *p;
 	if (anstype == T_CNAME || anstype == T_DNAME ||
 		anstype == T_PTR || anstype == T_A6) {
 		if (DNS_NUM_LABELS(datalen) + 1 + datalen > sizeof(q->an[0].rdata)) {
 			warnx("cannot encode more than QUERY_RDATA_SIZE (%d)", QUERY_RDATA_SIZE);
+			dns_packet_destroy(q);
 			return 0;
 		}
 		p = q->an[0].rdata;
@@ -200,8 +208,9 @@ dns_encode_data_answer(struct dns_packet *q, uint8_t *data, size_t datalen)
 		memcpy(data, q->an[0].rdata, datalen);
 		q->an[0].rdlength = datalen;
 	}
-	return 1;
+	return q;
 }
+#undef CHECKLEN
 
 #define CHECKLEN(x) if (buflen < (x) + (unsigned)(p-buf))  return 0
 
@@ -228,18 +237,16 @@ dns_encode_rr(uint8_t *buf, uint8_t **dst, size_t buflen, struct dns_rr *a, uint
 
 int
 dns_encode(uint8_t *buf, size_t *buflen, struct dns_packet *q)
-/*				puttxtbin(&p, buflen - (p - buf), data, datalen);
- * 					answer CNAME to A question */
 {
 	HEADER *header;
 	uint16_t ancount;
 	uint8_t *p;
 	size_t len;
 
-	if (buflen < sizeof(HEADER))
+	if (*buflen < sizeof(HEADER))
 		return 0;
 
-	memset(buf, 0, buflen);
+	memset(buf, 0, *buflen);
 
 	header = (HEADER*)buf;
 
@@ -274,17 +281,17 @@ dns_encode(uint8_t *buf, size_t *buflen, struct dns_packet *q)
 
 		/* Answer section */
 		for (uint16_t i = 0; i < q->ancount; i++) {
-			dns_encode_rr(buf, &p, buflen, q->an[i], qlabel[q->an[i].qnum]);
+			dns_encode_rr(buf, &p, *buflen, &q->an[i], qlabel[q->an[i].qnum]);
 		}
 
 		/* Authority/NS section */
 		for (uint16_t i = 0; i < q->nscount; i++) {
-			dns_encode_rr(buf, &p, buflen, q->ns[i], qlabel[q->ns[i].qnum]);
+			dns_encode_rr(buf, &p, *buflen, &q->ns[i], qlabel[q->ns[i].qnum]);
 		}
 
 		/* Additional section */
 		for (uint16_t i = 0; i < q->arcount; i++) {
-			dns_encode_rr(buf, &p, buflen, q->ar[i], qlabel[q->ar[i].qnum]);
+			dns_encode_rr(buf, &p, *buflen, &q->ar[i], qlabel[q->ar[i].qnum]);
 		}
 
 		break;
@@ -314,7 +321,7 @@ dns_encode(uint8_t *buf, size_t *buflen, struct dns_packet *q)
 }
 
 size_t
-dns_encode_ns_response(uint8_t *buf, size_t buflen, struct dns_packet *q, char *topdomain)
+dns_encode_ns_response(uint8_t *buf, size_t buflen, struct dns_packet *q, uint8_t *topdomain)
 /* Only used when iodined gets an NS type query */
 /* Mostly same as dns_encode_a_response() below */
 {
@@ -329,13 +336,14 @@ dns_encode_ns_response(uint8_t *buf, size_t buflen, struct dns_packet *q, char *
 	memset(buf, 0, buflen);
 
 	// TODO not null-terminated strings
-	domain_len = strlen(q->q[0].name) - strlen(topdomain);
-	if (domain_len < 0 || domain_len == 1)
-		return -1;
-	if (strcasecmp(q->q[0].name + domain_len, topdomain))
-		return -1;
-	if (domain_len >= 1 && q->q[0].name[domain_len - 1] != '.')
-		return -1;
+	domain_len = (q->q[0].name) - HOSTLEN(topdomain);
+	uint8_t *qtd = q->q[0].name + domain_len;
+	if (domain_len <= 1)
+		return 0;
+	if (memcmp(qtd, topdomain,  domain_len) != 0) {
+		DEBUG(2, "ns query outside topdomain: %s", format_host(q->q[0].name, q->q[0].namelen, 0));
+		return 0;
+	}
 
 	header = (HEADER*)buf;
 
@@ -361,7 +369,8 @@ dns_encode_ns_response(uint8_t *buf, size_t buflen, struct dns_packet *q, char *
 	topname = 0xc000 | ((p - buf + domain_len) & 0x3fff);
 
 	/* Query section */
-	putname(&p, buflen - (p - buf), q->q[0].name, q->q[0].namelen);	/* Name */
+	CHECKLEN(q->q[0].namelen);
+	putdata(&p, q->q[0].name, q->q[0].namelen);	/* Name */
 	CHECKLEN(4);
 	putshort(&p, q->q[0].type);	/* Type */
 	putshort(&p, C_IN);			/* Class */
@@ -391,7 +400,7 @@ dns_encode_ns_response(uint8_t *buf, size_t buflen, struct dns_packet *q, char *
 	putshort(&p, 4);			/* Data length */
 
 	/* ugly hack to output IP address */
-	ipp = (uint8_t *) &q->dest;
+	ipp = (uint8_t *) &q->m.dest;
 	CHECKLEN(4);
 	putbyte(&p, *(ipp++));
 	putbyte(&p, *(ipp++));
@@ -437,7 +446,7 @@ dns_encode_a_response(uint8_t *buf, size_t buflen, struct dns_packet *q)
 	name = 0xc000 | ((p - buf) & 0x3fff);
 
 	/* Query section */
-	putname(&p, buflen - (p - buf), q->q[0].name, q->q[0].namelen);	/* Name */
+	putname(&p, buflen - (p - buf), q->q[0].name, q->q[0].namelen, 0);	/* Name */
 	CHECKLEN(4);
 	putshort(&p, q->q[0].type);			/* Type */
 	putshort(&p, C_IN);			/* Class */
@@ -451,7 +460,7 @@ dns_encode_a_response(uint8_t *buf, size_t buflen, struct dns_packet *q)
 	putshort(&p, 4);			/* Data length */
 
 	/* ugly hack to output IP address */
-	ipp = (uint8_t *) &q->dest;
+	ipp = (uint8_t *) &q->m.dest;
 	CHECKLEN(4);
 	putbyte(&p, *(ipp++));
 	putbyte(&p, *(ipp++));
@@ -461,7 +470,6 @@ dns_encode_a_response(uint8_t *buf, size_t buflen, struct dns_packet *q)
 	len = p - buf;
 	return len;
 }
-
 #undef CHECKLEN
 
 unsigned short
@@ -478,6 +486,27 @@ dns_get_id(uint8_t *packet, size_t packetlen)
 
 #define CHECKLEN(x) if (packetlen < (x) + (unsigned)(p-packet))  return 0
 
+static size_t
+dns_decode_rr(uint8_t *packet, uint8_t **dst, size_t packetlen, struct dns_rr *a)
+{
+	uint8_t name[256], *p = *dst;
+	uint16_t class;
+	uint32_t ttl;
+
+	/* name of corresponding question */
+	readname(packet, packetlen, &p, name, sizeof(name), 1, 1);
+	CHECKLEN(10);
+	readshort(packet, &p, &a->type); /* answer type */
+	readshort(packet, &p, &class); /* answer class */
+	readlong(packet, &p, &ttl); /* answer TTL (seconds) */
+	readshort(packet, &p, &a->rdlength); /* length of RDATA */
+	CHECKLEN(a->rdlength);
+	readdata(&p, a->rdata, a->rdlength); /* RDATA */
+
+	*dst = p;
+	return (p - *dst);
+}
+
 struct dns_packet *
 dns_decode(uint8_t *packet, size_t packetlen)
 {
@@ -485,13 +514,18 @@ dns_decode(uint8_t *packet, size_t packetlen)
 	uint16_t class;
 	uint32_t ttl;
 	struct dns_packet *q;
+	HEADER *header = (HEADER *) packet;
 
 	/* Reject short packets */
-	if (packetlen < sizeof(HEADER))
+	if (packetlen < sizeof(HEADER)) {
 		return NULL;
+	} else if (!header->qdcount) {
+		/* we need a question */
+		return NULL;
+	}
 
-	HEADER *header = (HEADER *) packet;
-	q = dns_packet_create(ntohs(header->qdcount), ntohs(header->ancount));
+	q = dns_packet_create(ntohs(header->qdcount), ntohs(header->ancount),
+			ntohs(header->nscount), ntohs(header->arcount));
 	if (!q) {
 		warnx("error allocating memory for dns_packet!");
 		return NULL;
@@ -502,113 +536,150 @@ dns_decode(uint8_t *packet, size_t packetlen)
 	q->rcode = header->rcode;
 
 	p = packet + sizeof(HEADER);
-	if (header->arcount != 0 || header->nscount != 0) {
-		warnx("DNS response has %hu authority + %hu NS RRs!", ntohs(header->arcount), ntohs(header->nscount));
-	}
 
-	if(q->qdcount < 1) {
-		/* We need a question */
-		return -1;
-	}
 
 	/* Read question section */
 	for (uint16_t qn = 0; qn < q->qdcount; qn++) {
 		struct dns_question *qs = &q->q[qn];
-		qs->namelen = readname(packet, packetlen, &p, qs->name, sizeof(qs->name));
+		qs->namelen = readname(packet, packetlen, &p, qs->name, sizeof(qs->name), 0, 1);
 		CHECKLEN(4);
 		readshort(packet, &p, &qs->type);
 		readshort(packet, &p, &class);
 		if (class != C_IN) {
-			return -1;
+			return NULL;
 		}
 	}
 
 	if (q->qr == QR_ANSWER) {
-		if (q->ancount < 1) {
-			/* DNS errors like NXDOMAIN have ancount=0 and
-			   stop here. CNAME may also have A; MX/SRV may have
-			   multiple results. */
-			return -1;
+		/* Answer section RRs */
+		for (uint16_t i = 0; i < q->ancount; i++) {
+			dns_decode_rr(packet, &p, packetlen, &q->an[i]);
 		}
 
-		/* Answer section RRs */
-		struct dns_rr *a;
-		for (uint16_t ann = 0; ann < q->ancount; ann++) {
-			a = &q->an[ann];
-			/* name of corresponding question */
-			readname(packet, packetlen, &p, name, sizeof(name), 1, 1);
-			CHECKLEN(10);
-			readshort(packet, &p, &a->type); /* answer type */
-			readshort(packet, &p, &class); /* answer class */
-			readlong(packet, &p, &ttl); /* answer TTL (seconds) */
-			readshort(packet, &p, &a->rdlength); /* length of RDATA */
-			readdata(packet, &p, a->rdata, a->rdlength); /* RDATA */
+		/* Authority/NS section */
+		for (uint16_t i = 0; i < q->nscount; i++) {
+			dns_decode_rr(packet, &p, packetlen, &q->ns[i]);
+		}
+
+		/* Additional section */
+		for (uint16_t i = 0; i < q->arcount; i++) {
+			dns_decode_rr(packet, &p, packetlen, &q->ar[i]);
 		}
 	}
 
 	return q;
 }
 
+#define CHECKLEN(x) if (a->rdlength < (x) + (p-a->rdata))  return 0
 
 int
-dns_decode_rr(struct dns_rr *r, uint8_t *out, size_t *outlen)
+dns_decode_data_answer(struct dns_packet *q, uint8_t *out, size_t *outlen)
 {
-//	if (type == T_A || type == T_CNAME ||
-//		type == T_PTR || type == T_AAAA ||
-//		type == T_A6 || type == T_DNAME) {
-//
-//		/* Assume that first answer is what we wanted */
-//		if (type == T_A6) {
-//			unsigned char prefix;
-//			CHECKLEN(1);
-//			readdata(packet, &p, (uint8_t *) &prefix, 1);
-//			if (prefix != 128) {
-//				return 0;
-//			}
-//		}
-//		memset(name, 0, sizeof(name));
-//		readname(packet, packetlen, &p, name, sizeof(name) - 1);
-//	}
-//	else if ((type == T_MX || type == T_SRV) && buf) {
-//		/* We support 250 records, 250*(255+header) ~= 64kB.
-//		   Only exact 10-multiples are accepted, and gaps in
-//		   numbering are not jumped over (->truncated).
-//		   Hopefully DNS servers won't mess around too much.
-//		 */
-//		uint8_t names[250][QUERY_NAME_SIZE];
-//		uint8_t *rdatastart;
-//		unsigned short pref;
-//		int i;
-//		int offset;
-//
-//		memset(names, 0, sizeof(names));
-//
-//		for (i=0; i < ancount; i++) {
-//			readshort(packet, &p, &pref);
-//
-//			if (type == T_SRV) {
-//				/* skip weight, port */
-//				p += 4;
-//				CHECKLEN(0);
-//			}
-//
-//			if (pref % 10 == 0 && pref >= 10 &&
-//				pref < 2500) {
-//				readname(packet, packetlen, &p,
-//					 names[pref / 10 - 1],
-//					 QUERY_NAME_SIZE - 1);
-//				names[pref / 10 - 1][QUERY_NAME_SIZE-1] = '\0';
-//			}
-//
-//			/* always trust rlen, not name encoding */
-//			p = rdatastart + rlen;
-//			CHECKLEN(0);
-//		}
-//
-//	}
-//	else if (type == T_TXT && buf) {
-//		/* Assume that first answer is what we wanted */
-//		rv = readtxtbin(packet, &p, rlen, rdata, sizeof(rdata));
-//	}
 
+	if (q->qdcount < 1 || q->ancount < 1) {
+		/* must have a question! */
+		return 0;
+	}
+
+	struct dns_rr *a = &q->an[0];
+	size_t len;
+	uint16_t type = a->type;
+	uint8_t *p = a->rdata;
+	if (type == T_CNAME || type == T_PTR || type == T_A6 || type == T_DNAME) {
+		if (q->ancount > 1) {
+			warnx("dns_decode_data_answer: too many answer RRs for type!");
+		}
+		/* Assume that first answer is what we wanted */
+		if (type == T_A6) {
+			uint8_t prefix;
+			CHECKLEN(1);
+			readdata(&p, &prefix, 1);
+			if (prefix != 128) {
+				return 0;
+			}
+		}
+
+		CHECKLEN(1);
+		/* rest of RR is DNS-encoded hostname */
+		len = readname(a->rdata, a->rdlength, &p, out, *outlen, 1, 0);
+	} else if (type == T_MX || type == T_SRV) {
+		/* We support 250 records, 250*(255+header) ~= 64kB.
+		   Only exact 10-multiples are accepted, and gaps in
+		   numbering are not jumped over (->truncated).
+		   Hopefully DNS servers won't mess around too much. */
+		uint8_t *rdatastart;
+		uint16_t pref, lastpref = 0;
+		size_t offset = 0;
+
+		for (uint16_t j = 0; j < q->ancount; j++) {
+			for (uint16_t i = 0; i < q->ancount; i++) {
+				a = &q->an[i];
+				p = a->rdata;
+				CHECKLEN(2);
+				readshort(a->rdata, &p, &pref);
+
+				if (a->type == T_SRV) {
+					/* skip weight, port */
+					CHECKLEN(4);
+					p += 4;
+				} else if (a->type != T_MX) {
+					/* wrong type; expect only MX answers */
+					return 0;
+				}
+
+				if (pref == lastpref + 10) {
+					/* append query data to out */
+					CHECKLEN(1);
+					len = readname(a->rdata, a->rdlength, &p, out + offset, *outlen - offset, 1, 0);
+					offset += len;
+					lastpref += 10;
+				}
+			}
+			if (lastpref >= q->ancount * 10) {
+				/* decoded all MX/SRV RRs: done */
+				break;
+			}
+		}
+	} else if (type == T_TXT) {
+		/* Assume that first answer is what we wanted */
+		len = readtxtbin(a->rdata, &p, a->rdlength, out, *outlen);
+	} else if (type == T_NULL || type == T_PRIVATE) {
+		len = a->rdlength;
+		if (*outlen < len) {
+			return 0;
+		}
+		memcpy(out, a->rdata, len);
+	} else { /* unknown type? */
+		warnx("dns_decode_data_answer: unknown answer type %u", type);
+		return 0;
+	}
+
+	*outlen = len;
+	return 1;
 }
+#undef CHECKLEN
+
+int
+dns_decode_data_query(struct dns_packet *q, uint8_t *td, uint8_t *out, size_t *outlen)
+{
+	if (q->qdcount != 1) {
+		/* wrong number of questions */
+		return 0;
+	}
+	
+	struct dns_question *qs = &q->q[0];
+	/* check topdomain */
+	uint8_t *qtd = qs->name + qs->namelen - HOSTLEN(td);
+	if (memcmp(qtd, td, strlen(td) + 1) != 0) {
+		DEBUG(1, "invalid topdomain: %s; expected %s",
+				format_host(qtd, HOSTLEN(td), 0),
+				format_host(td, HOSTLEN(td), 1));
+		return 0;
+	}
+
+	uint8_t *p = qs->name;
+	size_t len = readname(qs->name, qs->namelen, &p, out, *outlen, 1, 0);
+	*outlen = len;
+	return 1;
+}
+#undef CHECKLEN

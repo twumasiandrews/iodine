@@ -40,16 +40,16 @@
 #include "base32.h"
 #include "test.h"
 
-static void dump_packet(char *, size_t);
+static void dump_packet(uint8_t *, size_t);
 
-static char query_packet[] =
+static uint8_t query_packet[] =
 	"\x05\x39\x01\x00\x00\x01\x00\x00\x00\x00\x00\x01\x2D\x41\x6A\x62\x63"
 	"\x75\x79\x74\x63\x70\x65\x62\x30\x67\x71\x30\x6C\x74\x65\x62\x75\x78"
 	"\x67\x69\x64\x75\x6E\x62\x73\x73\x61\x33\x64\x66\x6F\x6E\x30\x63\x61"
 	"\x7A\x64\x62\x6F\x72\x71\x71\x04\x6B\x72\x79\x6F\x02\x73\x65\x00\x00"
 	"\x0A\x00\x01\x00\x00\x29\x10\x00\x00\x00\x80\x00\x00\x00";
 
-static char answer_packet[] =
+static uint8_t answer_packet[] =
 	"\x05\x39\x84\x00\x00\x01\x00\x01\x00\x00\x00\x00\x05\x73\x69\x6C\x6C"
 	"\x79\x04\x68\x6F\x73\x74\x02\x6F\x66\x06\x69\x6F\x64\x69\x6E\x65\x04"
 	"\x63\x6F\x64\x65\x04\x6B\x72\x79\x6F\x02\x73\x65\x00\x00\x0A\x00\x01"
@@ -57,77 +57,64 @@ static char answer_packet[] =
 	"\x69\x73\x20\x74\x68\x65\x20\x6D\x65\x73\x73\x61\x67\x65\x20\x74\x6F"
 	"\x20\x62\x65\x20\x64\x65\x6C\x69\x76\x65\x72\x65\x64";
 
-static char answer_packet_high_trans_id[] =
+static uint8_t answer_packet_high_trans_id[] =
 	"\x85\x39\x84\x00\x00\x01\x00\x01\x00\x00\x00\x00\x05\x73\x69\x6C\x6C"
 	"\x79\x04\x68\x6F\x73\x74\x02\x6F\x66\x06\x69\x6F\x64\x69\x6E\x65\x04"
 	"\x63\x6F\x64\x65\x04\x6B\x72\x79\x6F\x02\x73\x65\x00\x00\x0A\x00\x01"
 	"\xC0\x0C\x00\x0A\x00\x01\x00\x00\x00\x00\x00\x23\x74\x68\x69\x73\x20"
 	"\x69\x73\x20\x74\x68\x65\x20\x6D\x65\x73\x73\x61\x67\x65\x20\x74\x6F"
 	"\x20\x62\x65\x20\x64\x65\x6C\x69\x76\x65\x72\x65\x64";
-static char *msgData = "this is the message to be delivered";
+static uint8_t msgData[] = "this is the message to be delivered";
 static char *topdomain = "kryo.se";
 
-static char *innerData = "HELLO this is the test data";
+static uint8_t innerData[] = "HELLO this is the test data";
 
 START_TEST(test_encode_query)
 {
-	char buf[512];
-	char resolv[512];
-	struct query q;
+	uint8_t buf[512], resolv[512];
+	struct dns_packet *q;
 	struct encoder *enc;
-	char *d;
-	size_t len;
-	size_t enclen;
+	size_t len, enclen;
 	int ret;
 
 	enclen = sizeof(resolv);
 	memset(&buf, 0, sizeof(buf));
 	memset(&resolv, 0, sizeof(resolv));
 	memset(&q, 0, sizeof(struct query));
-	q.type = T_NULL;
-	q.id = 1337;
-	d = resolv;
 	enc = get_base32_encoder();
 
-	*d++ = 'A';
-	enc->encode((uint8_t *)d, &enclen, (uint8_t *)innerData, strlen(innerData));
-	d = resolv + strlen(resolv);
-	if (*d != '.') {
-		*d++ = '.';
-	}
-	strcpy(d, topdomain);
-	len = sizeof(buf);
-	ret = dns_encode(buf, len, &q, QR_QUERY, resolv, strlen(resolv));
-	len = sizeof(query_packet) - 1; /* Skip extra null character */
+	len = enc->encode(resolv, &enclen, innerData, sizeof(innerData) - 1);
 
-	if (strncmp(query_packet, buf, sizeof(query_packet)) || ret != len) {
+	q = dns_encode_data_query(T_NULL, topdomain, resolv, len);
+	len = sizeof(buf);
+	ret = dns_encode(buf, &len, q);
+	fail_if(len != sizeof(query_packet) - 1); /* Skip extra null character */
+
+	if (memcmp(query_packet, buf, len) != 0 || len != sizeof(query_packet) - 1) {
 		printf("\n");
-		dump_packet(query_packet, len);
+		dump_packet(query_packet, sizeof(query_packet) - 1);
 		dump_packet(buf, ret);
+		fail("Did not compile expected packet; pktlen=%u, expected=%u", len, sizeof(query_packet) - 1);
 	}
-	fail_unless(strncmp(query_packet, buf, sizeof(query_packet)) == 0, "Did not compile expected packet");
-	fail_unless(ret == len, "Bad packet length: %d, expected %d", ret, len);
 }
 END_TEST
 
 START_TEST(test_decode_query)
 {
-	char buf[512];
-	char *domain;
-	struct query q;
+	uint8_t buf[512];
+	struct dns_packet *q;
 	struct encoder *enc;
 	size_t len;
 
-	memset(&q, 0, sizeof(struct query));
 	memset(&buf, 0, sizeof(buf));
-	q.id = 0;
 	len = sizeof(query_packet) - 1;
 	enc = get_base32_encoder();
 
-	dns_decode(buf, sizeof(buf), &q, QR_QUERY, query_packet, len);
-	domain = strstr(q.name, topdomain);
+	fail_if((q = dns_decode(query_packet, len)) == NULL);
+	fail_if(q->qr != QR_QUERY);
 	len = sizeof(buf);
-	unpack_data((uint8_t *)buf, len, (uint8_t *)(q.name + 1), (int) (domain - q.name) - 1, enc);
+	// TODO unencode data
+
 
 	fail_unless(strncmp(buf, innerData, strlen(innerData)) == 0, "Did not extract expected host: '%s'", buf);
 	fail_unless(strlen(buf) == strlen(innerData), "Bad host length: %d, expected %d: '%s'", strlen(buf), strlen(innerData), buf);
@@ -136,58 +123,65 @@ END_TEST
 
 START_TEST(test_encode_response)
 {
-	char buf[512];
-	char *host = "silly.host.of.iodine.code.kryo.se";
-	struct query q;
-	int len;
+	uint8_t buf[512], *p;
+	uint8_t host[] = "silly.host.of.iodine.code.kryo.se";
+	struct dns_packet *q;
+	size_t len;
 	int ret;
 
 	len = sizeof(buf);
-	memset(&buf, 0, sizeof(buf));
-	memset(&q, 0, sizeof(struct query));
-	strncpy(q.name, host, strlen(host));
-	q.type = T_NULL;
-	q.id = 1337;
+	memset(buf, 0, sizeof(buf));
 
-	ret = dns_encode(buf, len, &q, QR_ANSWER, msgData, strlen(msgData));
-	len = sizeof(answer_packet) - 1; /* Skip extra null character */
+	// TODO test with dns_encode_data_answer
+	fail_if((q = dns_packet_create(1, 1, 0, 0)) == NULL);
+	q->id = 1337;
+	q->q[0].type = T_NULL;
+	p = q->q[0].name;
+	putname(&p, 255, host, sizeof(host) - 1, 0);
 
-	fail_unless(strncmp(answer_packet, buf, sizeof(answer_packet)) == 0, "Did not compile expected packet");
-	fail_unless(ret == len, "Bad packet length: %d, expected %d", ret, len);
+	ret = dns_encode(buf, &len, q);
+
+	fail_unless(memcmp(answer_packet, buf, sizeof(answer_packet) - 1) == 0, "Did not compile expected packet");
+	fail_unless(len == sizeof(buf), "Bad packet length: %d, expected %d", len, sizeof(buf));
 }
 END_TEST
 
 START_TEST(test_decode_response)
 {
-	char buf[512];
-	struct query q;
-	int len;
+	uint8_t buf[512];
+	struct dns_packet *q;
+	size_t len;
 	int ret;
 
 	len = sizeof(buf);
 	memset(&buf, 0, sizeof(buf));
 
-	ret = dns_decode(buf, len, &q, QR_ANSWER, answer_packet, sizeof(answer_packet)-1);
+	fail_if((q = dns_decode(answer_packet, sizeof(answer_packet) - 1)) == NULL);
+
+//	fail_if(ret = dns_decode_query())
 	fail_unless(ret == strlen(msgData), "Bad data length: %d, expected %d", ret, strlen(msgData));
 	fail_unless(strncmp(msgData, buf, strlen(msgData)) == 0, "Did not extract expected data");
-	fail_unless(q.id == 0x0539);
+	fail_unless(q->id == 0x0539);
 }
 END_TEST
 
 START_TEST(test_decode_response_with_high_trans_id)
 {
-	char buf[512];
-	struct query q;
-	int len;
+	uint8_t buf[512];
+	struct dns_packet *q;
+	size_t len;
 	int ret;
 
-	len = sizeof(buf);
 	memset(&buf, 0, sizeof(buf));
 
-	ret = dns_decode(buf, len, &q, QR_ANSWER, answer_packet_high_trans_id, sizeof(answer_packet_high_trans_id)-1);
-	fail_unless(ret == strlen(msgData), "Bad data length: %d, expected %d", ret, strlen(msgData));
-	fail_unless(strncmp(msgData, buf, strlen(msgData)) == 0, "Did not extract expected data");
-	fail_unless(q.id == 0x8539, "q.id was %08X instead of %08X!", q.id, 0x8539);
+	fail_if((q = dns_decode(answer_packet_high_trans_id, sizeof(answer_packet_high_trans_id) - 1)) == NULL);
+
+	len = sizeof(buf);
+	fail_unless(dns_decode_data_query(q, topdomain, buf, &len));
+
+	fail_unless(len == sizeof(msgData) - 1, "Bad data length: %u, expected %u", ret, sizeof(msgData) - 1);
+	fail_unless(memcmp(msgData, buf, sizeof(msgData) - 1) == 0, "Did not extract expected data");
+	fail_unless(q->id == 0x8539, "q.id was %08X instead of %08X!", q->id, 0x8539);
 }
 END_TEST
 
@@ -224,19 +218,19 @@ START_TEST(test_get_id_high)
 END_TEST
 
 static void
-dump_packet(char *buf, size_t len)
+dump_packet(uint8_t *buf, size_t len)
 {
 	int pos;
 
 	for (pos = 0; pos < len; pos++) {
-		printf("\\x%02X", (unsigned char) buf[pos]);
+		printf(" %02X", buf[pos]);
 	}
 	printf("\n");
 	for (pos = 0; pos < len; pos++) {
-		if (isalnum((unsigned char) buf[pos])) {
-			printf(" %c  ", (unsigned char) buf[pos]);
+		if (isalnum(buf[pos])) {
+			printf(" %c ", buf[pos]);
 		} else {
-			printf("    ");
+			printf(" * ");
 		}
 	}
 	printf("\n");

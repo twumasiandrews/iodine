@@ -41,11 +41,21 @@
 #define T_UNSET 65432
 /* Unused RR type, never actually sent */
 
+#define HOSTLEN(dnshost)		(strlen((char *) dnshost) + 1)
+
 
 typedef enum {
 	QR_QUERY = 0,
 	QR_ANSWER = 1
 } qr_t;
+
+/* general packet metadata */
+struct pkt_metadata {
+	struct timeval time_recv;
+	struct sockaddr_storage dest;
+	struct sockaddr_storage from;
+	socklen_t destlen, fromlen;
+};
 
 /* question data */
 struct dns_question {
@@ -67,10 +77,7 @@ struct dns_packet {
 	struct dns_rr *an; /* array of ANCOUNT answer RRs */
 	struct dns_rr *ns; /* array of NSCOUNT NS authority RRs */
 	struct dns_rr *ar; /* array of ARCOUNT additional RRs */
-	struct sockaddr_storage dest;
-	struct sockaddr_storage from;
-	struct timeval time_recv;
-	socklen_t destlen, fromlen;
+	struct pkt_metadata m;
 	qr_t qr;
 	uint16_t id;
 	uint16_t rcode;
@@ -84,13 +91,17 @@ struct dns_packet {
 
 extern int dnsc_use_edns0;
 
-struct dns_packet *dns_packet_create(uint16_t qdcount, uint16_t ancount);
+struct dns_packet *dns_packet_create(uint16_t qdcount, uint16_t ancount, uint16_t nscount, uint16_t arcount);
 void dns_packet_destroy(struct dns_packet *p);
 
+struct dns_packet *dns_encode_data_query(uint16_t qtype, uint8_t *td, uint8_t *data, size_t datalen);
+struct dns_packet *dns_encode_data_answer(struct dns_packet *q, uint8_t *data, size_t datalen);
 int dns_encode(uint8_t *buf, size_t *buflen, struct dns_packet *data);
-size_t dns_encode_ns_response(uint8_t *buf, size_t buflen, struct dns_packet *q, char *topdomain);
+size_t dns_encode_ns_response(uint8_t *buf, size_t buflen, struct dns_packet *q, uint8_t *topdomain);
 size_t dns_encode_a_response(uint8_t *buf, size_t buflen, struct dns_packet *q);
-unsigned short dns_get_id(uint8_t *packet, size_t packetlen);
-struct dns_packet *dns_decode(uint8_t *, size_t *);
 
+unsigned short dns_get_id(uint8_t *packet, size_t packetlen);
+struct dns_packet *dns_decode(uint8_t *, size_t);
+int dns_decode_data_answer(struct dns_packet *q, uint8_t *out, size_t *outlen);
+int dns_decode_data_query(struct dns_packet *q, uint8_t *td, uint8_t *out, size_t *outlen);
 #endif /* _DNS_H_ */
