@@ -23,6 +23,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#include "common.h"
 #include "read.h"
 #include "dns.h"
 
@@ -74,7 +75,14 @@ readname_loop(uint8_t *packet, size_t packetlen, uint8_t **src, uint8_t *dst,
 		}
 
 		while (labellen && len < length - 1 && packetlen - (s - packet) > 1) {
-			*d++ = *s++;
+			if (!bin && *s == DOT_CHAR) {
+				/* dot in middle of hostname: data is technically invalid but
+				 * as a solution just replace with some other character */
+				*d++ = INVALID_CHAR;
+				s++;
+			} else {
+				*d++ = *s++;
+			}
 			len++;
 			labellen--;
 		}
@@ -84,7 +92,7 @@ readname_loop(uint8_t *packet, size_t packetlen, uint8_t **src, uint8_t *dst,
 		}
 
 		if (!bin && *s != 0) {
-			*d++ = '.';
+			*d++ = DOT_CHAR;
 			len++;
 		}
 	}
@@ -136,7 +144,7 @@ readlong(uint8_t *packet, uint8_t **src, uint32_t *dst)
 }
 
 size_t
-readdata(uint8_t *packet, uint8_t **src, uint8_t *dst, size_t len)
+readdata(uint8_t **src, uint8_t *dst, size_t len)
 {
 	memcpy(dst, *src, len);
 
@@ -188,7 +196,7 @@ putname(uint8_t **buf, size_t buflen, uint8_t *host, size_t hostlen, int bin)
 	p++;
 
 	while (1) {
-		if (((*h == '.' && !bin) || (len == DNS_MAXLABEL && bin)) || hpos >= hostlen) {
+		if (((*h == DOT_CHAR && !bin) || (len == DNS_MAXLABEL && bin)) || hpos >= hostlen) {
 			if (!bin) {
 				h++;
 			}

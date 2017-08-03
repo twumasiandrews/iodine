@@ -98,7 +98,7 @@ START_TEST(test_read_name_empty_loop)
 	memset(buf, 0, sizeof(buf));
 	data = emptyloop + sizeof(HEADER);
 	buf[1023] = 'A';
-	rv = readname(emptyloop, sizeof(emptyloop), &data, buf, 1023);
+	rv = readname(emptyloop, sizeof(emptyloop), &data, buf, 1023, 0, 0);
 	fail_unless(rv == 0);
 	fail_unless(buf[1023] == 'A');
 }
@@ -116,7 +116,7 @@ START_TEST(test_read_name_inf_loop)
 	memset(buf, 0, sizeof(buf));
 	data = infloop + sizeof(HEADER);
 	buf[4] = '\a';
-	rv = readname(infloop, sizeof(infloop), &data, buf, 4);
+	rv = readname(infloop, sizeof(infloop), &data, buf, 4, 0, 0);
 	fail_unless(data - infloop <= sizeof(infloop) && rv == 4);
 	fail_unless(buf[4] == '\a');
 }
@@ -140,7 +140,7 @@ START_TEST(test_read_name_longname)
 	memset(buf, 0, sizeof(buf));
 	data = longname + sizeof(HEADER);
 	buf[256] = '\a';
-	rv = readname(longname, sizeof(longname), &data, buf, 256);
+	rv = readname(longname, sizeof(longname), &data, buf, 256, 0, 0);
 	fail_unless(data - longname <= sizeof(longname) && rv == 256);
 	fail_unless(buf[256] == '\a');
 }
@@ -167,7 +167,7 @@ START_TEST(test_read_name_invalid)
 		memcpy(b, invalid, sizeof(invalid));
 		data = b + sizeof(HEADER);
 		buf[160] = '\a';
-		rv = readname(b, sizeof(invalid), &data, buf, 256);
+		rv = readname(b, sizeof(invalid), &data, buf, 256, 0, 0);
 
 		fail_unless(rv == 160);
 		fail_unless(buf[160] == '\a');
@@ -190,7 +190,7 @@ START_TEST(test_read_name_onejump)
 
 	memset(buf, 0, sizeof(buf));
 	data = onejump + sizeof(HEADER);
-	rv = readname(onejump, sizeof(onejump), &data, buf, 256);
+	rv = readname(onejump, sizeof(onejump), &data, buf, 256, 0, 0);
 	fail_unless(rv == 8);
 }
 END_TEST
@@ -211,7 +211,7 @@ START_TEST(test_read_name_badjump_start)
 	if (jumper) {
 		memcpy(jumper, badjump, sizeof(badjump));
 		data = jumper + sizeof(HEADER);
-		rv = readname(jumper, sizeof(badjump), &data, buf, 256);
+		rv = readname(jumper, sizeof(badjump), &data, buf, 256, 0, 0);
 
 		fail_unless(rv == 0);
 		fail_unless(buf[0] == 0);
@@ -236,7 +236,7 @@ START_TEST(test_read_name_badjump_second)
 	if (jumper) {
 		memcpy(jumper, badjump2, sizeof(badjump2));
 		data = jumper + sizeof(HEADER);
-		rv = readname(jumper, sizeof(badjump2), &data, buf, 256);
+		rv = readname(jumper, sizeof(badjump2), &data, buf, 256, 0, 0);
 
 		fail_unless(rv == 3);
 		fail_unless(memcmp("BA.", buf, 3) == 0, "incorrect result from readname");
@@ -255,7 +255,7 @@ START_TEST(test_putname)
 
 	memset(buf, 0, 256);
 	b = buf;
-	ret = putname(&b, 256, domain, sizeof(domain)-1);
+	ret = putname(&b, 256, domain, sizeof(domain) - 1, 0);
 	/*for (int i = 0; i < ret; i++){
 		fprintf(stderr, "%02x", buf[i]);
 	}
@@ -280,7 +280,7 @@ START_TEST(test_putname_nodot)
 
 	memset(buf, 0, 256);
 	b = buf;
-	ret = putname(&b, 256, nodot, sizeof(nodot));
+	ret = putname(&b, 256, nodot, sizeof(nodot), 0);
 
 	fail_unless(ret == 0);
 	fail_unless(b == buf);
@@ -302,7 +302,7 @@ START_TEST(test_putname_toolong)
 
 	memset(buf, 0, 256);
 	b = buf;
-	ret = putname(&b, 256, toolong, sizeof(toolong));
+	ret = putname(&b, 256, toolong, sizeof(toolong), 0);
 
 	fail_unless(ret == 0);
 	fail_unless(b == buf);
