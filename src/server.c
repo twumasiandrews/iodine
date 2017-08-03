@@ -65,26 +65,6 @@ WSADATA wsa_data;
 #include <err.h>
 #endif
 
-static void
-send_raw(int fd, uint8_t *buf, size_t buflen, int user, int cmd, struct sockaddr_storage *from, socklen_t fromlen)
-{
-	char packet[buflen + RAW_HDR_LEN];
-	int len = buflen;
-
-	memcpy(packet, raw_header, RAW_HDR_LEN);
-	if (len) {
-		memcpy(&packet[RAW_HDR_LEN], buf, len);
-	}
-
-	len += RAW_HDR_LEN;
-	packet[RAW_HDR_CMD] = cmd | (user & 0x0F);
-
-	DEBUG(3, "TX-raw: client %s (user %d), cmd %d, %d bytes",
-			format_addr(from, fromlen), user, cmd, len);
-
-	sendto(fd, packet, len, 0, (struct sockaddr *) from, fromlen);
-}
-
 /* Ringbuffer Query Handling (qmem) and DNS Cache:
    This is used to make the handling duplicates and query timeouts simpler
    and all handled in one place.
@@ -1048,88 +1028,6 @@ raw_decode(uint8_t *packet, size_t len, struct query *q, int dns_fd)
 		return 0;
 	}
 	return 1;
-}
-
-static int
-read_dns(int fd, struct query *q)
-{
-	struct sockaddr_storage from;
-	socklen_t addrlen;
-	uint8_t packet[64*1024];
-	int r;
-#ifndef WINDOWS32
-	char control[CMSG_SPACE(sizeof (struct in6_pktinfo))];
-	struct msghdr msg;
-	struct iovec iov;
-	struct cmsghdr *cmsg;
-
-	addrlen = sizeof(struct sockaddr_storage);
-	iov.iov_base = packet;
-	iov.iov_len = sizeof(packet);
-
-	msg.msg_name = (caddr_t) &from;
-	msg.msg_namelen = (unsigned) addrlen;
-	msg.msg_iov = &iov;
-	msg.msg_iovlen = 1;
-	msg.msg_control = control;
-	msg.msg_controllen = sizeof(control);
-	msg.msg_flags = 0;
-
-	r = recvmsg(fd, &msg, 0);
-#else
-	addrlen = sizeof(struct sockaddr_storage);
-	r = recvfrom(fd, packet, sizeof(packet), 0, (struct sockaddr*)&from, &addrlen);
-#endif /* !WINDOWS32 */
-
-	if (r > 0) {
-		memcpy(&q->from, &from, addrlen);
-		q->fromlen = addrlen;
-		gettimeofday(&q->time_recv, NULL);
-
-		/* TODO do not handle raw packets here! */
-		if (raw_decode(packet, r, q, fd)) {
-			return 0;
-		}
-		if (dns_decode(NULL, 0, q, QR_QUERY, (char *)packet, r) < 0) {
-			return 0;
-		}
-
-#ifndef WINDOWS32
-		memset(&q->destination, 0, sizeof(struct sockaddr_storage));
-		/* Read destination IP address */
-		for (cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL;
-			cmsg = CMSG_NXTHDR(&msg, cmsg)) {
-
-			if (cmsg->cmsg_level == IPPROTO_IP &&
-				cmsg->cmsg_type == DSTADDR_SOCKOPT) {
-
-				struct sockaddr_in *addr = (struct sockaddr_in *) &q->destination;
-				addr->sin_family = AF_INET;
-				addr->sin_addr = *dstaddr(cmsg);
-				q->dest_len = sizeof(*addr);
-				break;
-			}
-			if (cmsg->cmsg_level == IPPROTO_IPV6 &&
-				cmsg->cmsg_type == IPV6_PKTINFO) {
-
-				struct in6_pktinfo *pktinfo;
-				struct sockaddr_in6 *addr = (struct sockaddr_in6 *) &q->destination;
-				pktinfo = (struct in6_pktinfo *) CMSG_DATA(cmsg);
-				addr->sin6_family = AF_INET6;
-				memcpy(&addr->sin6_addr, &pktinfo->ipi6_addr, sizeof(struct in6_addr));
-				q->dest_len = sizeof(*addr);
-				break;
-			}
-		}
-#endif
-
-		return strlen(q->name);
-	} else if (r < 0) {
-		/* Error */
-		warn("read dns");
-	}
-
-	return 0;
 }
 
 static size_t

@@ -59,18 +59,6 @@
 
 #define INSTANCE server
 
-#if defined IP_RECVDSTADDR
-# define DSTADDR_SOCKOPT IP_RECVDSTADDR
-# define dstaddr(x) ((struct in_addr *) CMSG_DATA(x))
-#elif defined IP_PKTINFO
-# define DSTADDR_SOCKOPT IP_PKTINFO
-# define dstaddr(x) (&(((struct in_pktinfo *)(CMSG_DATA(x)))->ipi_addr))
-#endif
-
-#ifndef IPV6_RECVPKTINFO
-#define IPV6_RECVPKTINFO IPV6_PKTINFO
-#endif
-
 #if !defined(BSD) && !defined(__GLIBC__)
 static char *__progname;
 #endif
@@ -95,7 +83,6 @@ struct server_instance {
 	int netmask;
 	in_addr_t ns_ip;
 	int bind_port;
-	int debug;
 
 	int addrfamily;
 	struct dnsfd dns_fds;
@@ -125,6 +112,7 @@ typedef enum {
 	VERSION_FULL
 } version_ack_t;
 
+/* TODO use struct dns_answer in QMEM */
 struct query_answer {
 	uint8_t data[4096];
 	size_t len;

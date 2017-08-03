@@ -57,6 +57,9 @@
 
 #include "common.h"
 #include "encoding.h"
+#include "dns.h"
+#include "read.h"
+#include "hmac_md5.h"
 
 /* The raw header used when not using DNS protocol */
 const unsigned char raw_header[RAW_HDR_LEN] = {
@@ -66,6 +69,8 @@ const unsigned char raw_header[RAW_HDR_LEN] = {
 		0x00, 0x00, 0x00, 0x00,
 		0x00, 0x00, 0x00, 0x00
 	};
+
+int debug = 0;
 
 /* daemon(3) exists only in 4.4BSD or later, and in GNU libc */
 #if !defined(ANDROID) && !defined(WINDOWS32) && !(defined(BSD) && (BSD >= 199306)) && !defined(__GLIBC__)
@@ -123,6 +128,29 @@ check_superuser(void (*usage_fn)(void))
 		/* NOTREACHED */
 	}
 #endif
+}
+
+char *
+format_host(uint8_t *host, size_t hostlen, size_t bufnum)
+/* nicely formats DNS-encoded hostname with printable chars
+ * returns null-terminated string */
+{
+	static char bufarr[(QUERY_NAME_SIZE + 1) * 2];
+	char *buf = bufarr + bufnum * (QUERY_NAME_SIZE + 1);
+	if (hostlen > QUERY_NAME_SIZE || bufnum > 2) {
+		return NULL;
+	}
+
+	uint8_t *p = host;
+	size_t len = readname(host, hostlen, &p, (uint8_t *)buf, QUERY_NAME_SIZE, 0, 0);
+
+	for (size_t i = 0; i < len; i++) {
+		if (!isprint(buf[i])) {
+			buf[i] = INVALID_CHAR;
+		}
+	}
+	buf[len + 1] = 0;
+	return buf;
 }
 
 char *
@@ -237,6 +265,100 @@ open_dns_from_host(char *host, int port, int addr_family, int flags)
 
 	return open_dns(&addr, addrlen);
 }
+
+int
+read_packet(int fd, uint8_t *pkt, size_t *pktlen, struct pkt_metadata *m)
+{
+	uint8_t packet[64*1024];
+	int r;
+	m->fromlen = sizeof(struct sockaddr_storage);
+
+#ifndef WINDOWS32
+	char control[CMSG_SPACE(sizeof (struct in6_pktinfo))];
+	struct msghdr msg;
+	struct iovec iov;
+	struct cmsghdr *cmsg;
+
+	iov.iov_base = pkt;
+	iov.iov_len = *pktlen;
+
+	msg.msg_name = (caddr_t) &m->from;
+	msg.msg_namelen = m->fromlen;
+	msg.msg_iov = &iov;
+	msg.msg_iovlen = 1;
+	msg.msg_control = control;
+	msg.msg_controllen = sizeof(control);
+	msg.msg_flags = 0;
+
+	r = recvmsg(fd, &msg, 0);
+#else
+	r = recvfrom(fd, pkt, *pktlen, 0, (struct sockaddr*)&m->from, &m->fromlen);
+#endif /* !WINDOWS32 */
+
+	if (r > 0) {
+		m->fromlen = msg.msg_namelen;
+		gettimeofday(&m->time_recv, NULL);
+		*pktlen = (size_t) r;
+
+#ifndef WINDOWS32
+		/* Read destination IP address */
+		for (cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL;
+			cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+
+			if (cmsg->cmsg_level == IPPROTO_IP &&
+				cmsg->cmsg_type == DSTADDR_SOCKOPT) {
+
+				struct sockaddr_in *addr = (struct sockaddr_in *) &m->dest;
+				addr->sin_family = AF_INET;
+				addr->sin_addr = *dstaddr(cmsg);
+				m->destlen = sizeof(*addr);
+				break;
+			}
+			if (cmsg->cmsg_level == IPPROTO_IPV6 &&
+				cmsg->cmsg_type == IPV6_PKTINFO) {
+
+				struct in6_pktinfo *pktinfo;
+				struct sockaddr_in6 *addr = (struct sockaddr_in6 *) &m->dest;
+				pktinfo = (struct in6_pktinfo *) CMSG_DATA(cmsg);
+				addr->sin6_family = AF_INET6;
+				memcpy(&addr->sin6_addr, &pktinfo->ipi6_addr, sizeof(struct in6_addr));
+				m->destlen = sizeof(*addr);
+				break;
+			}
+		}
+#endif
+		return 1;
+	} else if (r < 0) {
+		/* Error */
+		warn("read packet");
+	}
+
+	return 0;
+}
+
+void
+send_raw(int fd, uint8_t *buf, size_t buflen, int user, int cmd, uint32_t cmc,
+		uint8_t *hmac_key, struct sockaddr_storage *to, socklen_t tolen)
+{
+	uint8_t packet[buflen + RAW_HDR_LEN], hmac[16];
+
+	/* construct raw packet for HMAC */
+	memcpy(packet, raw_header, RAW_HDR_LEN);
+	packet[RAW_HDR_CMD] = (cmd & 0xF0) | (user & 0x0F);
+	*(uint32_t *) (packet + RAW_HDR_CMC) = htonl(cmc);
+
+	if (buf && buflen) memcpy(packet + RAW_HDR_LEN, buf, buflen);
+
+	/* calculate HMAC and insert into header */
+	hmac_md5(hmac, hmac_key, 16, packet, sizeof(packet));
+	memcpy(packet + RAW_HDR_HMAC, hmac, RAW_HDR_HMAC_LEN);
+
+	DEBUG(3, "TX-raw: client %s (user %d), cmd %d, %d bytes",
+			format_addr(to, tolen), user, cmd, sizeof(packet));
+
+	sendto(fd, packet, sizeof(packet), 0, (struct sockaddr *) to, tolen);
+}
+
 
 void
 close_socket(int fd)

@@ -132,6 +132,18 @@ extern const unsigned char raw_header[RAW_HDR_LEN];
 # define DONT_FRAG_VALUE 1
 #endif
 
+#if defined IP_RECVDSTADDR
+# define DSTADDR_SOCKOPT IP_RECVDSTADDR
+# define dstaddr(x) ((struct in_addr *) CMSG_DATA(x))
+#elif defined IP_PKTINFO
+# define DSTADDR_SOCKOPT IP_PKTINFO
+# define dstaddr(x) (&(((struct in_pktinfo *)(CMSG_DATA(x)))->ipi_addr))
+#endif
+
+#ifndef IPV6_RECVPKTINFO
+#define IPV6_RECVPKTINFO IPV6_PKTINFO
+#endif
+
 #ifndef GITREVISION
 #define GITREVISION "GIT"
 #endif
@@ -151,7 +163,7 @@ extern const unsigned char raw_header[RAW_HDR_LEN];
 		fprintf(stderr, __VA_ARGS__);
 
 #define DEBUG(level, ...) \
-		if (INSTANCE.debug >= level) {\
+		if (debug >= level) {\
 			TIMEPRINT("[D%d %s:%d] ", level, __FILE__, __LINE__); \
 			fprintf(stderr, __VA_ARGS__);\
 			fprintf(stderr, "\n");\
@@ -189,12 +201,18 @@ enum connection {
 	CONN_MAX
 };
 
+extern int debug;		/* enable debug level */
+
 void check_superuser(void (*usage_fn)(void));
+char *format_host(uint8_t *host, size_t hostlen, size_t bufnum);
 char *format_addr(struct sockaddr_storage *sockaddr, int sockaddr_len);
 int get_addr(char *, int, int, int, struct sockaddr_storage *);
 int open_dns(struct sockaddr_storage *, size_t);
 int open_dns_opt(struct sockaddr_storage *sockaddr, size_t sockaddr_len, int v6only);
 int open_dns_from_host(char *host, int port, int addr_family, int flags);
+int read_packet(int fd, uint8_t *pkt, size_t *pktlen, struct pkt_metadata *m);
+void send_raw(int fd, uint8_t *buf, size_t buflen, int user, int cmd, uint32_t cmc,
+		uint8_t *hmac_key, struct sockaddr_storage *from, socklen_t fromlen);
 void close_socket(int);
 
 int open_tcp_nonblocking(struct sockaddr_storage *addr, char **error);
