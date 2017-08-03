@@ -39,7 +39,6 @@ static int reverse_init = 0;
 
 static size_t base64_encode(uint8_t *, size_t *, const uint8_t *, size_t);
 static size_t base64_decode(uint8_t *, size_t *, const uint8_t *, size_t);
-static int base64_handles_dots();
 static size_t base64_blksize_raw();
 static size_t base64_blksize_enc();
 static size_t base64_encoded_length(size_t inputlen);
@@ -50,8 +49,6 @@ struct encoder base64_encoder =
 	"Base64",
 	base64_encode,
 	base64_decode,
-	base64_handles_dots,
-	base64_handles_dots,
 	base64_blksize_raw,
 	base64_blksize_enc,
 	base64_encoded_length,
@@ -64,12 +61,6 @@ struct encoder
 *get_base64_encoder()
 {
 	return &base64_encoder;
-}
-
-static int
-base64_handles_dots()
-{
-	return 0;
 }
 
 static size_t

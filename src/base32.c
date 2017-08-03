@@ -39,7 +39,6 @@ static int reverse_init = 0;
 
 static size_t base32_encode(uint8_t *, size_t *, const uint8_t *, size_t);
 static size_t base32_decode(uint8_t *, size_t *, const uint8_t *, size_t);
-static int base32_handles_dots();
 static size_t base32_blksize_raw();
 static size_t base32_blksize_enc();
 static size_t base32_encoded_length(size_t inputlen);
@@ -51,8 +50,6 @@ struct encoder base32_encoder =
 	"Base32",
 	base32_encode,
 	base32_decode,
-	base32_handles_dots,
-	base32_handles_dots,
 	base32_blksize_raw,
 	base32_blksize_enc,
 	base32_encoded_length,
@@ -65,12 +62,6 @@ struct encoder
 *get_base32_encoder()
 {
 	return &base32_encoder;
-}
-
-static int
-base32_handles_dots()
-{
-	return 0;
 }
 
 static size_t

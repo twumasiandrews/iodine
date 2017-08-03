@@ -58,7 +58,6 @@ static int reverse_init = 0;
 
 static size_t base128_encode(uint8_t *, size_t *, const uint8_t *, size_t);
 static size_t base128_decode(uint8_t *, size_t *, const uint8_t *, size_t);
-static int base128_handles_dots();
 static size_t base128_blksize_raw();
 static size_t base128_blksize_enc();
 static size_t base128_encoded_length(size_t inputlen);
@@ -69,8 +68,6 @@ struct encoder base128_encoder =
 	"Base128",
 	base128_encode,
 	base128_decode,
-	base128_handles_dots,
-	base128_handles_dots,
 	base128_blksize_raw,
 	base128_blksize_enc,
 	base128_encoded_length,
@@ -83,12 +80,6 @@ struct encoder
 *get_base128_encoder()
 {
 	return &base128_encoder;
-}
-
-static int
-base128_handles_dots()
-{
-	return 0;
 }
 
 static size_t

@@ -28,28 +28,35 @@
 #include "base128.h"
 
 size_t
-get_raw_length_from_dns(size_t enc_bytes, struct encoder *enc, const char *topdomain)
+get_raw_length_from_dns(size_t dns_hostlen, struct encoder *enc, const uint8_t *topdomain)
 /* Returns the maximum length of raw data that can be encoded into enc_bytes */
 {
-	/* 4 byte for dots and extra - seems necessary */
-	size_t enc_datalen = enc_bytes - strlen(topdomain) - 4;
-	/* Number of dots in length of encoded data */
-	size_t dots = 1;
-	if (!enc->eats_dots()) /* Dots are not included in encoded data length */
-		 dots += enc_datalen / (DNS_MAXLABEL);
-	enc_datalen -= dots;
-	return enc->get_raw_length(enc_datalen);
+	/* 1 byte for dot before topdomain */
+	size_t enc_datalen = dns_hostlen - 1 - HOSTLEN(topdomain);
+
+	/* Number of dots in length of encoded data -
+	   Dots are not included in encoded data length */
+	enc_datalen -= DNS_NUM_LABELS(enc_datalen) + 1;
+
+	if (enc)
+		return enc->get_raw_length(enc_datalen);
+	else
+		return enc_datalen;
 }
 
 size_t
-get_encoded_dns_length(size_t raw_bytes, struct encoder *enc, const char *topdomain)
+get_encoded_dns_length(size_t raw_bytes, struct encoder *enc, const uint8_t *topdomain)
 /* Returns length of encoded data from original data length orig_len; */
 {
 	size_t dots = 1; /* dot before topdomain */
-	size_t len = enc->get_encoded_length(raw_bytes);
-	if (!enc->places_dots())
-		dots += len / DNS_MAXLABEL; /* number of dots needed in data */
-	return len + dots + strlen(topdomain);
+	size_t len;
+	if (enc)
+		len = enc->get_encoded_length(raw_bytes);
+	else
+		len = raw_bytes;
+
+	dots += len / DNS_MAXLABEL; /* number of dots needed in data */
+	return len + dots + HOSTLEN(topdomain);
 }
 
 size_t

@@ -31,16 +31,14 @@ struct encoder {
 	char name[8];
 	size_t (*encode) (uint8_t *buf, size_t *buflen, const uint8_t *udata, size_t size);
 	size_t (*decode) (uint8_t *buf, size_t *buflen, const uint8_t *udata, size_t size);
-	int (*places_dots) (void);
-	int (*eats_dots) (void);
 	size_t (*blocksize_raw)(void);
 	size_t (*blocksize_encoded)(void);
 	size_t (*get_encoded_length)(size_t);
 	size_t (*get_raw_length)(size_t);
 };
 
-size_t get_raw_length_from_dns(size_t enc_bytes, struct encoder *enc, const char *topdomain);
-size_t get_encoded_dns_length(size_t raw_bytes, struct encoder *enc, const char *topdomain);
+size_t get_raw_length_from_dns(size_t enc_bytes, struct encoder *enc, const uint8_t *topdomain);
+size_t get_encoded_dns_length(size_t raw_bytes, struct encoder *enc, const uint8_t *topdomain);
 
 size_t build_hostname(uint8_t *, size_t, const uint8_t *, const size_t, const char *, struct encoder *, size_t, size_t);
 size_t unpack_data(uint8_t *, size_t, uint8_t *, size_t, struct encoder *);
