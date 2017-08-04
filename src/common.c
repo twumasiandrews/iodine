@@ -61,6 +61,8 @@
 #include "read.h"
 #include "hmac_md5.h"
 
+char hex[] = "0123456789abcdef";
+
 /* The raw header used when not using DNS protocol */
 const unsigned char raw_header[RAW_HDR_LEN] = {
 		0x10, 0xd1, 0x9e, 0x00,
@@ -130,6 +132,26 @@ check_superuser(void (*usage_fn)(void))
 #endif
 }
 
+#define MAX_DATA_LEN 256
+char *
+tohexstr(uint8_t *data, size_t datalen, size_t bufnum)
+/* nicely formats binary data as ASCII hex null-terminated string */
+{
+	static char bufarr[(MAX_DATA_LEN * 2 + 1) * 2];
+	char *buf = bufarr + bufnum * (MAX_DATA_LEN * 2 + 1);
+	if (datalen > MAX_DATA_LEN || bufnum >= 2) {
+		return NULL;
+	}
+
+	size_t i = 0;
+	for (; i < datalen; i++) {
+		buf[i * 2] = hex[(data[i] & 0xF0) >> 4];
+		buf[i * 2 + 1] = hex[data[i] & 0x0F];
+	}
+	buf[i * 2] = 0;
+	return buf;
+}
+
 char *
 format_host(uint8_t *host, size_t hostlen, size_t bufnum)
 /* nicely formats DNS-encoded hostname with printable chars
@@ -137,7 +159,7 @@ format_host(uint8_t *host, size_t hostlen, size_t bufnum)
 {
 	static char bufarr[(QUERY_NAME_SIZE + 1) * 2];
 	char *buf = bufarr + bufnum * (QUERY_NAME_SIZE + 1);
-	if (hostlen > QUERY_NAME_SIZE || bufnum > 2) {
+	if (hostlen > QUERY_NAME_SIZE || bufnum >= 2) {
 		return NULL;
 	}
 
