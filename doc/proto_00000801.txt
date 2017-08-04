@@ -220,16 +220,16 @@ Server sends (len 2):
 1.5 Data packets and pings
 --------------------------
 
-Upstream data (len 1+8+2+data):
+Upstream data (len 1+(9-17)+1+data):
 	1 char ASCII hex coded user ID
 	rest encoded with chosen upstream codec (default base32):
-    4 bytes CMC
-    4 bytes HMAC
 	1 byte flags:
      76543210
     +--------+
-    |00000CFL|
+    |0000HCFL|
     +--------+
+    4 bytes CMC
+    4-12 bytes HMAC
     1 byte packet sequence ID
 
 Downstream data header (len 2+data):
@@ -238,13 +238,13 @@ Downstream data header (len 2+data):
 	                  |=> only if ping (P) flag set       |
     0        1        3        4        5        6        7
     +--------+76543210+--------+--------+--------+--------+
-    | Seq ID |0EIPACFL|Dn Wsize|Up Wsize|DnWstart|UpWstart| (+ data...)
+    | Seq ID |0EIP0CFL|Dn Wsize|Up Wsize|DnWstart|UpWstart| (+ data...)
     +--------+--------+--------+--------+--------+--------+
 
 Flags and fields:
 	UUUU = Userid
+	H = 1: 32-bit HMAC, 0: 96-bit HMAC
 	L = Last fragment flag
-	A = ACK flag
 	F = First fragment flag
 	C = Compression enabled
 	P = ping flag: extra header present - downstream only
