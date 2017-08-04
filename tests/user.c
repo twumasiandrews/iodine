@@ -32,8 +32,6 @@
 #include "user.h"
 #include "test.h"
 
-int debug = 0;
-
 START_TEST(test_init_users)
 {
 	in_addr_t ip;

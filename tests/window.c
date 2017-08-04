@@ -31,8 +31,8 @@
 #include "window.h"
 #include "test.h"
 
-struct frag_buffer *in, *out;
-char origdata[1000] = "";
+static struct frag_buffer *in, *out;
+static char origdata[1000] = "";
 
 START_TEST(test_window_everything)
 {
