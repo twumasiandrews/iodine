@@ -32,7 +32,6 @@ struct tun_user {
 	struct sockaddr_storage remoteforward_addr;
 	struct frag_buffer *incoming;
 	struct frag_buffer *outgoing;
-	struct encoder *encoder;
 	struct qmem_buffer qmem; // TODO dynamic allocation
 	size_t fragsize;
 	socklen_t hostlen;
@@ -49,7 +48,7 @@ struct tun_user {
 	char lazy;
 	char id;
 	uint8_t downenc;
-	char downenc_bits;
+	uint8_t upenc;
 	char down_compression;
 	char active;
 	char authenticated;
