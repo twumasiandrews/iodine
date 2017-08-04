@@ -29,7 +29,24 @@
 
 struct encoder {
 	char name[8];
+	/* encode: Fills *buf with max. *buflen characters, encoding size bytes of *data.
+	 *
+	 * NOTE: *buf space should be at least 1 byte _more_ than *buflen
+	 * to hold the trailing '\0'.
+	 *
+	 * return value    : #bytes filled in buf   (excluding \0)
+	 * sets *buflen to : #bytes encoded from data */
 	size_t (*encode) (uint8_t *buf, size_t *buflen, const uint8_t *udata, size_t size);
+
+	/* decode: fills *buf with max. *buflen bytes, decoded from slen chars in *str.
+	 * Decoding stops early when *str contains \0.
+	 * Illegal encoded chars are assumed to decode to zero.
+	 *
+	 * NOTE: *buf space should be at least 1 byte _more_ than *buflen
+	 * to hold a trailing '\0' that is added (though *buf will usually
+	 * contain full-binary data).
+	 *
+	 * return value    : #bytes filled in buf   (excluding \0) */
 	size_t (*decode) (uint8_t *buf, size_t *buflen, const uint8_t *udata, size_t size);
 	size_t (*blocksize_raw)(void);
 	size_t (*blocksize_encoded)(void);
@@ -41,11 +58,11 @@ size_t get_raw_length_from_dns(size_t enc_bytes, struct encoder *enc, const uint
 size_t get_encoded_dns_length(size_t raw_bytes, struct encoder *enc, const uint8_t *topdomain);
 
 size_t build_hostname(uint8_t *, size_t, const uint8_t *, const size_t, const char *, struct encoder *, size_t, size_t);
-size_t unpack_data(uint8_t *, size_t, uint8_t *, size_t, struct encoder *);
 size_t inline_dotify(uint8_t *, size_t);
 size_t inline_undotify(uint8_t *, size_t);
 struct encoder *get_encoder(uint8_t codec);
-size_t encode_data(uint8_t *, size_t, uint8_t *, size_t, uint8_t, int);
+size_t encode_data(uint8_t *, size_t, uint8_t *, size_t, uint8_t);
+size_t unpack_data(uint8_t *, size_t, uint8_t *, size_t, uint8_t);
 
 
 

@@ -82,8 +82,7 @@ build_hostname(uint8_t *buf, size_t buflen, const uint8_t *data, const size_t da
 //	warnx("build_hostname: enc %lu, predicted %lu; maxlen %lu, header %lu, datalen %lu, space %lu",
 //		  encdata_len, encoder->get_encoded_length(datalen), maxlen, header_len, datalen, space);
 
-	if (!encoder->places_dots())
-		enc = inline_dotify(buf - header_len, buflen + header_len) - header_len;
+	enc = inline_dotify(buf - header_len, buflen + header_len) - header_len;
 
 	b = buf + enc;
 
@@ -99,14 +98,6 @@ build_hostname(uint8_t *buf, size_t buflen, const uint8_t *data, const size_t da
 //			buf - header_len, strlen(buf - header_len), encdata_len + header_len + strlen(topdomain)+1, b);
 
 	return space;
-}
-
-size_t
-unpack_data(uint8_t *buf, size_t buflen, uint8_t *data, size_t datalen, struct encoder *enc)
-{
-	if (!enc->eats_dots())
-		datalen = inline_undotify(data, datalen);
-	return enc->decode(buf, &buflen, data, datalen);
 }
 
 size_t
@@ -193,26 +184,32 @@ get_encoder(uint8_t codec)
 }
 
 size_t
-encode_data(uint8_t *buf, size_t buflen, uint8_t *data,
-		size_t datalen, uint8_t codec, int dots)
+encode_data(uint8_t *buf, size_t buflen, uint8_t *data, size_t datalen, uint8_t codec)
 /* Returns #bytes of data that were encoded */
 {
 	struct encoder *enc;
 
-	/* encode data,datalen to CNAME/MX answer */
 	enc = get_encoder(codec);
 	if (enc == NULL) {
-		if (dots) {
-			datalen = inline_dotify(data, datalen);
-		}
 		memcpy(buf, data, MIN(buflen, datalen));
 		return MIN(buflen, datalen);
 	}
 
-	if (dots) {
-		return build_hostname(buf, buflen, data, datalen, "", enc, 0xFF, 1);
-	} else {
-		buflen--;
-		return enc->encode(buf + 1, &buflen, data, datalen);
-	}
+	buflen--; /* encoders add trailing zero byte which is not counted in buflen */
+	return enc->encode(buf, &buflen, data, datalen);
 }
+
+size_t
+unpack_data(uint8_t *buf, size_t buflen, uint8_t *data, size_t datalen, uint8_t codec)
+{
+	struct encoder *enc;
+
+	enc = get_encoder(codec);
+	if (enc == NULL) {
+		memcpy(buf, data, MIN(buflen, datalen));
+		return MIN(buflen, datalen);
+	}
+
+	return enc->decode(buf, &buflen, data, datalen);
+}
+
