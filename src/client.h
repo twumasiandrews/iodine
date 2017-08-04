@@ -108,7 +108,6 @@ struct client_instance {
 
 	char userid;			/* My userid at the server */
 	char userid_char;		/* used when sending (lowercase) */
-	char userid_char2;		/* also accepted when receiving (uppercase) */
 
 	struct encoder *dataenc;	/* encoder struct for downstream data */
 	char downenc;			/* encoder type char to use for downstream data */
@@ -141,9 +140,9 @@ void client_set_hostname_maxlen(size_t i);
 int client_handshake();
 int client_tunnel();
 
-int parse_data(uint8_t *data, size_t len, fragment *f, int *immediate, int*);
-int handshake_waitdns(char *buf, size_t buflen, char cmd, int timeout);
-void handshake_switch_options(int lazy, int compression, char denc);
-int send_ping(int ping_response, int ack, int timeout, int);
+static int parse_data(uint8_t *data, size_t len, fragment *f, int *immediate, int*);
+static int handshake_waitdns(uint8_t *buf, size_t *buflen, char cmd, int timeout);
+static void handshake_switch_options(int lazy, int compression, char denc);
+static int send_ping(int ping_response, int ack, int timeout, int);
 
 #endif

@@ -57,6 +57,7 @@
 #include "base64.h"
 #include "base64u.h"
 #include "base128.h"
+#include "read.h"
 #include "dns.h"
 #include <src/auth.h>
 #include "tun.h"
@@ -170,7 +171,7 @@ immediate_mode_defaults()
 /* Handy macro for printing this.stats with messages */
 #ifdef DEBUG_BUILD
 #define QTRACK_DEBUG(l, ...) \
-	if (this.debug >= l) {\
+	if (debug >= l) {\
 		TIMEPRINT("[QTRACK (%" L "u/%" L "u), ? %" L "u, TO %" L "u, S %" L "u/%" L "u] ", this.num_pending, PENDING_QUERIES_LENGTH, \
 				this.num_untracked, this.num_timeouts, window_sending(this.outbuf, NULL), this.outbuf->numitems); \
 		fprintf(stderr, __VA_ARGS__);\
@@ -314,7 +315,7 @@ got_response(int id, int immediate, int fail)
 				}
 			}
 
-			if (immediate || this.debug >= 4) {
+			if (immediate || debug >= 4) {
 				timersub(&now, &this.pending_queries[i].time, &rtt);
 				rtt_ms = timeval_to_ms(&rtt);
 			}
@@ -355,31 +356,29 @@ got_response(int id, int immediate, int fail)
 }
 
 static int
-send_query(uint8_t *hostname)
+send_query(uint8_t *encdata, size_t encdatalen)
 /* Returns DNS ID of sent query */
 {
 	uint8_t packet[4096];
-	struct query q;
-	size_t len;
-
-	DEBUG(3, "TX: pkt len %" L "u: hostname '%s'", strlen((char *)hostname), hostname);
+	struct dns_packet *q;
+	size_t len = sizeof(packet);
 
 	this.lastid += 7727;
-	if (this.lastid == 0)
-		/* 0 is used as "no-query" in iodined.c */
-		this.lastid = rand() & 0xFF;
 
-	q.id = this.lastid;
-	q.type = this.do_qtype;
+	q = dns_encode_data_query(this.do_qtype, this.topdomain, encdata, encdatalen);
+	if (q == NULL) {
+		DEBUG(1, "send_query: dns_encode_data_query failed");
+		return -1;
+	}
 
-	len = dns_encode(packet, sizeof(packet), &q,
-			QR_QUERY, hostname, strlen(hostname));
-	if (len < 1) {
+	q->id = this.lastid;
+
+	if (!dns_encode(packet, &len, q)) {
 		warnx("dns_encode doesn't fit");
 		return -1;
 	}
 
-	DEBUG(4, "  TX: Qid %5d name[0] '%c'", q.id, hostname[0]);
+	DEBUG(3, "TX: Qid %5d len %" L "u: hostname '%.*s'", q->id, encdatalen, (int)encdatalen, encdata);
 
 	sendto(this.dns_fd, packet, len, 0,
 			(struct sockaddr*)&this.nameserv_addrs[this.current_nameserver].addr,
@@ -425,35 +424,14 @@ send_query(uint8_t *hostname)
 			update_server_timeout(1);
 		}
 	}
-	return q.id;
-}
-
-static void
-send_raw(uint8_t *buf, size_t buflen, int cmd)
-{
-	uint8_t packet[4096], hmac[16];
-
-	size_t len = MIN(sizeof(packet) - RAW_HDR_LEN, buflen);
-
-	/* construct raw packet for HMAC */
-	memcpy(packet, raw_header, RAW_HDR_LEN);
-	len += RAW_HDR_LEN;
-	packet[RAW_HDR_CMD] = (cmd & 0xF0) | (this.userid & 0x0F);
-	*(uint32_t *) (packet + RAW_HDR_CMC) = htonl(CMC(this.cmc_up));
-	memcpy(packet + RAW_HDR_LEN, buf, len);
-
-	/* calculate HMAC and insert into header */
-	hmac_md5(hmac, this.hmac_key, 16, packet, len);
-	memcpy(packet + RAW_HDR_HMAC, hmac, RAW_HDR_HMAC_LEN);
-
-	sendto(this.dns_fd, packet, len, 0, (struct sockaddr*)&this.raw_serv,
-			this.raw_serv_len);
+	return q->id;
 }
 
 static void
 send_raw_data(uint8_t *data, size_t datalen)
 {
-	send_raw(data, datalen, RAW_HDR_CMD_DATA);
+	send_raw(this.dns_fd, data, datalen, this.userid, RAW_HDR_CMD_DATA,
+			CMC(this.cmc_up), this.hmac_key, &this.raw_serv, this.raw_serv_len);
 }
 
 
@@ -462,7 +440,7 @@ send_packet(char cmd, const uint8_t *rawdata, const size_t rawdatalen, const int
 /* Base32 encodes data and sends as single DNS query
  * Returns ID of sent query */
 {
-	uint32_t len = rawdatalen + hmaclen + 6;
+	size_t len = rawdatalen + hmaclen + 6;
 	uint8_t buf[512], data[len + 4], hmac[16];
 
 	if (rawdata && rawdatalen) {
@@ -486,20 +464,20 @@ send_packet(char cmd, const uint8_t *rawdata, const size_t rawdatalen, const int
 		5. HMAC is calculated using the output from (4) and inserted into the HMAC
 			field in the data header. The data is then encoded (ie. base32 + dots)
 			and the query is sent. */
-		*(uint32_t *) data = htonl(len);
+		*(uint32_t *) data = htonl((uint32_t) len);
 		memcpy(data + 4, buf, 2);
 		memset(data + 10, 0, hmaclen);
 		hmac_md5(hmac, this.hmac_key, 16, data, len + 4);
 		memcpy(data + 10, hmac, hmaclen);
 	}
 
-	build_hostname(buf, sizeof(buf), data + 6, len - 2,
-				   this.topdomain, b32, this.hostname_maxlen, 2);
+	size_t encdatalen, buflen = sizeof(buf);
+	encdatalen = b32->encode(buf + 2, &buflen, data + 6, len - 2);
 
-	return send_query(buf);
+	return send_query(buf, encdatalen + 2);
 }
 
-int
+static int
 send_ping(int ping_response, int ack, int set_timeout, int disconnect)
 {
 	this.num_pings++;
@@ -538,7 +516,8 @@ send_ping(int ping_response, int ack, int set_timeout, int disconnect)
 		query_sent_now(id);
 		return id;
 	} else {
-		send_raw(NULL, 0, RAW_HDR_CMD_PING);
+		send_raw(this.dns_fd, NULL, 0, this.userid, RAW_HDR_CMD_PING,
+				CMC(this.cmc_up), this.hmac_key, &this.raw_serv, this.raw_serv_len);
 		return -1;
 	}
 }
@@ -547,12 +526,10 @@ static void
 send_next_frag()
 /* Sends next available fragment of data from the outgoing window buffer */
 {
-	static uint8_t buf[MAX_FRAGSIZE], hdr[5];
-	int code, id;
-	static int datacmc = 0;
-	static char *datacmcchars = "abcdefghijklmnopqrstuvwxyz0123456789";
+	static uint8_t buf[MAX_FRAGSIZE], flags;
+	uint16_t id;
 	fragment *f;
-	size_t buflen;
+	size_t buflen, hmaclen = 4;
 
 	/* Get next fragment to send */
 	f = window_get_next_sending_fragment(this.outbuf, &this.next_downstream_ack);
@@ -566,35 +543,40 @@ send_next_frag()
 		return; /* nothing to send */
 	}
 
-	/* Build upstream data header (see doc/proto_xxxxxxxx.txt) */
-	buf[0] = this.userid_char;		/* First byte is hex this.userid */
+	/* Build upstream data header (see doc/proto_xxxxxxxx.txt) with HMAC.
+	 * 	1. Packet data and header is assembled (data is not encoded yet).
+		2. HMAC field is set to 0.
+		3. Data to be encoded is appended to string (ie. cmd + userid chars) at
+			beginning of query name.
+		4. Length (32 bits, network byte order) is prepended to the result from (3)
+			Length = (len of chars at start of query) + (len of raw data)
+		5. HMAC is calculated using the output from (4) and inserted into the HMAC
+			field in the data header. The data is then encoded (ie. base32 + dots)
+			and the query is sent. */
+	uint8_t hmacbuf[4 + 1 + 5 + hmaclen + 1 + f->len], hmac[16], *p;
+	p = hmacbuf;
+	/* flags (0000HCFL); hmaclen is either 4 or 12 */
+	flags = ((hmaclen == 4 ? 1 : 0) << 3) | (f->compressed << 2) | (f->start << 1) | f->end;
+	putlong(&p, sizeof(hmacbuf));		/* data length (only used for HMAC) */
+	putbyte(&p, (uint8_t) this.userid_char); /* First byte is hex userid */
+	putbyte(&p, flags);					/* one byte flags */
+	putlong(&p, CMC(this.cmc_up));		/* 4 bytes CMC */
+	memset(p, 0, hmaclen), p+= hmaclen;	/* 4-12 bytes zero'ed HMAC field */
+	putbyte(&p, f->seqID & 0xFF);		/* one byte fragment sequence ID */
+	putdata(&p, f->data, f->len);		/* fragment data */
+	hmac_md5(hmac, this.hmac_key, 16, hmacbuf, sizeof(hmacbuf));
+	memcpy(hmacbuf + 10, hmac, hmaclen); /* copy in HMAC */
 
-	buf[1] = datacmcchars[datacmc]; /* Second byte is data-CMC */
-
-	/* Next 3 bytes is seq ID, downstream ACK and flags */
-	code = ((f->ack_other < 0 ? 0 : 1) << 3) | (f->compressed << 2)
-			| (f->start << 1) | f->end;
-
-	hdr[0] = f->seqID & 0xFF;
-	hdr[1] = f->ack_other & 0xFF;
-	hdr[2] = code << 4; /* Flags are in upper 4 bits - lower 4 unused */
-
+	/* encode data prepared in hmacbuf */
+	buf[0] = this.userid_char;
 	buflen = sizeof(buf) - 1;
-	/* Encode 3 bytes data into 2 bytes after buf */
-	b32->encode(buf + 2, &buflen, hdr, 3);
+	buflen = this.dataenc->encode(buf, &buflen, hmacbuf + 5, sizeof(hmacbuf) - 5);
 
-	/* Encode data into buf after header (6 = user + CMC + 4 bytes header) */
-	build_hostname(buf, sizeof(buf), f->data, f->len, this.topdomain,
-				   this.dataenc, this.hostname_maxlen, 6);
+	DEBUG(3, " SEND DATA: seq %d, ack %d, len %" L "u, s%d e%d c%d flags %02X hmac=%s",
+			f->seqID, f->ack_other, f->len, f->start, f->end, f->compressed, flags,
+			tohexstr(hmac, hmaclen, 0));
 
-	datacmc++;
-	if (datacmc >= 36)
-		datacmc = 0;
-
-	DEBUG(3, " SEND DATA: seq %d, ack %d, len %" L "u, s%d e%d c%d flags %1X",
-			f->seqID, f->ack_other, f->len, f->start, f->end, f->compressed, hdr[2] >> 4);
-
-	id = send_query(buf);
+	id = send_query(buf, buflen + 1);
 	/* Log query ID as being sent now */
 	query_sent_now(id);
 	window_tick(this.outbuf);
@@ -603,7 +585,7 @@ send_next_frag()
 }
 
 static void
-write_dns_error(struct query *q, int ignore_some_errors)
+write_dns_error(struct dns_packet *q, int ignore_some_errors)
 /* This is called from:
    1. handshake_waitdns() when already checked that reply fits to our
       latest query.
@@ -652,213 +634,88 @@ write_dns_error(struct query *q, int ignore_some_errors)
 	}
 }
 
-static size_t
-dns_namedec(uint8_t *outdata, size_t outdatalen, uint8_t *buf, size_t buflen)
-/* Decodes *buf to *outdata.
- * *buf WILL be changed by undotify.
- * Note: buflen must be _exactly_ strlen(buf) before undotifying.
- * (undotify of reduced-len won't copy \0, base-X decode will decode too much.)
- * Returns #bytes usefully filled in outdata.
- */
+static void
+handle_data_servfail()
+/* some logic to minimize SERVFAILs, usually caused by DNS servers treating lazy
+ * mode queries as timed out, so this attempts to reduce server timeout so that
+ * queries are responded to sooner and eventually disabling lazy mode */
 {
-	size_t outdatalenu = outdatalen;
+	this.num_servfail++;
 
-	switch (buf[0]) {
-	case 'h': /* Hostname with base32 */
-	case 'H':
-		/* Need 1 byte H, 3 bytes ".xy", >=1 byte data */
-		if (buflen < 5)
-			return 0;
-
-		/* this also does undotify */
-		return unpack_data(outdata, outdatalen, buf + 1, buflen - 4, b32);
-
-	case 'i': /* Hostname++ with base64 */
-	case 'I':
-		/* Need 1 byte I, 3 bytes ".xy", >=1 byte data */
-		if (buflen < 5)
-			return 0;
-
-		/* this also does undotify */
-		return unpack_data(outdata, outdatalen, buf + 1, buflen - 4, b64);
-
-	case 'j': /* Hostname++ with base64u */
-	case 'J':
-		/* Need 1 byte J, 3 bytes ".xy", >=1 byte data */
-		if (buflen < 5)
-			return 0;
-
-		/* this also does undotify */
-		return unpack_data(outdata, outdatalen, buf + 1, buflen - 4, b64u);
-
-	case 'k': /* Hostname++ with base128 */
-	case 'K':
-		/* Need 1 byte J, 3 bytes ".xy", >=1 byte data */
-		if (buflen < 5)
-			return 0;
-
-		/* this also does undotify */
-		return unpack_data(outdata, outdatalen, buf + 1, buflen - 4, b128);
-
-	case 't': /* plain base32(Thirty-two) from TXT */
-	case 'T':
-		if (buflen < 2)
-			return 0;
-
-		return b32->decode(outdata, &outdatalenu, buf + 1, buflen - 1);
-
-	case 's': /* plain base64(Sixty-four) from TXT */
-	case 'S':
-		if (buflen < 2)
-			return 0;
-
-		return b64->decode(outdata, &outdatalenu, buf + 1, buflen - 1);
-
-	case 'u': /* plain base64u (Underscore) from TXT */
-	case 'U':
-		if (buflen < 2)
-			return 0;
-
-		return b64u->decode(outdata, &outdatalenu, buf + 1, buflen - 1);
-
-	case 'v': /* plain base128 from TXT */
-	case 'V':
-		if (buflen < 2)
-			return 0;
-
-		return b128->decode(outdata, &outdatalenu, buf + 1, buflen - 1);
-
-	case 'r': /* Raw binary from TXT */
-	case 'R':
-		/* buflen>=1 already checked */
-		buflen--;
-		buflen = MIN(buflen, outdatalen);
-		memcpy(outdata, buf + 1, buflen);
-		return buflen;
-
-	default:
-		warnx("Received unsupported encoding");
-		return 0;
+	if (!this.lazymode) {
+		return;
 	}
 
-	/* notreached */
-	return 0;
+	if (this.send_query_recvcnt < 500 && this.num_servfail < 4) {
+		fprintf(stderr, "Hmm, that's %" L "d SERVFAILs. Your data should still go through...\n", this.num_servfail);
+
+	} else if (this.send_query_recvcnt < 500 && this.num_servfail >= 10 &&
+		this.autodetect_server_timeout && this.max_timeout_ms >= 500 && this.num_servfail % 5 == 0) {
+
+		this.max_timeout_ms -= 200;
+		double target_timeout = (float) this.max_timeout_ms / 1000.0;
+		fprintf(stderr, "Too many SERVFAILs (%" L "d), reducing timeout to"
+			" %.1f secs. (use -I%.1f next time on this network)\n",
+				this.num_servfail, target_timeout, target_timeout);
+
+		/* Reset query counts this.stats */
+		this.send_query_sendcnt = 0;
+		this.send_query_recvcnt = 0;
+		update_server_timeout(1);
+
+	} else if (this.send_query_recvcnt < 500 && this.num_servfail >= 40 &&
+		this.autodetect_server_timeout && this.max_timeout_ms < 500) {
+
+		/* last-ditch attempt to fix SERVFAILs - disable lazy mode */
+		immediate_mode_defaults();
+		fprintf(stderr, "Attempting to disable lazy mode due to excessive SERVFAILs\n");
+		handshake_switch_options(0, this.compression_down, this.downenc);
+	}
 }
 
 static int
-read_dns_withq(uint8_t *buf, size_t buflen, struct query *q)
-/* Returns -1 on receive error or decode error, including DNS error replies.
-   Returns 0 on replies that could be correct but are useless, and are not
-   DNS error replies.
-   Returns >0 on correct replies; value is #valid bytes in *buf.
-*/
+raw_validate(uint8_t **packet, size_t len, uint8_t *cmd)
 {
-	struct sockaddr_storage from;
-	uint8_t pkt[64*1024];
-	socklen_t addrlen;
-	int pktlen;
+	uint8_t hmac_pkt[16], hmac[16], userid;
+	uint32_t cmc;
 
-	addrlen = sizeof(from);
-	if ((pktlen = recvfrom(this.dns_fd, pkt, sizeof(pkt), 0,
-			  (struct sockaddr*)&from, &addrlen)) <= 0) {
-		warn("recvfrom");
-		return pktlen;
-	}
+	/* minimum length */
+	if (len < RAW_HDR_LEN) return 0;
+	/* should start with header */
+	if (memcmp(*packet, raw_header, RAW_HDR_IDENT_LEN))
+		return 0;
 
-	if (this.conn == CONN_DNS_NULL) {
-		int hostlen;
-		hostlen = dns_decode((char *)buf, buflen, q, QR_ANSWER, (char *)pkt, pktlen);
-		if (hostlen <= 0) {
-			return hostlen;
-		}
+	userid = RAW_HDR_GET_USR(*packet);
 
-		if (q->type == T_CNAME || q->type == T_TXT ||
-			q->type == T_PTR || q->type == T_A6 || q->type == T_DNAME)
-		/* CNAME can also be returned from an A question */
-		{
-			/*
-			 * buf is a hostname or txt stream that we still need to
-			 * decode to binary
-			 *
-			 * also update rv with the number of valid bytes
-			 *
-			 * data is unused here, and will certainly hold the smaller binary
-			 */
+	*cmd = RAW_HDR_GET_CMD(*packet);
+	cmc = ntohl(*(uint32_t *) (*packet + RAW_HDR_CMC));
+	// TODO check CMC
+	memset(hmac_pkt, 0, sizeof(hmac_pkt));
+	memcpy(hmac_pkt, *packet + RAW_HDR_HMAC, RAW_HDR_HMAC_LEN);
 
-			hostlen = dns_namedec(pkt, sizeof(pkt), buf, hostlen);
+	DEBUG(2, "RX-raw: user %d, raw command 0x%02X, length %" L "u", userid, *cmd, len);
 
-			hostlen = MIN(hostlen, buflen);
-			if (hostlen > 0)
-				memcpy(buf, pkt, hostlen);
+	*packet += RAW_HDR_LEN;
+	len -= RAW_HDR_LEN;
 
-		} else if (q->type == T_MX || q->type == T_SRV) {
-			/* buf is like "Hname.com\0Hanother.com\0\0" */
-			int buftotal = hostlen;	/* idx of last \0 */
-			int bufoffset = 0;
-			int dataoffset = 0;
-			int thispartlen, dataspace, datanew;
-
-			while (1) {
-				thispartlen = strlen((char *)buf);
-				thispartlen = MIN(thispartlen, buftotal-bufoffset);
-				dataspace = sizeof(pkt) - dataoffset;
-				if (thispartlen <= 0 || dataspace <= 0)
-					break;
-
-				datanew = dns_namedec(pkt + dataoffset, dataspace,
-						      buf + bufoffset, thispartlen);
-				if (datanew <= 0)
-					break;
-
-				bufoffset += thispartlen + 1;
-				dataoffset += datanew;
-			}
-			hostlen = dataoffset;
-			hostlen = MIN(hostlen, buflen);
-			if (hostlen > 0)
-				memcpy(buf, pkt, hostlen);
-		}
-
-		DEBUG(2, "RX: id %5d name[0]='%c' len=%" L "u", q->id, q->name[0], hostlen);
-
-		return hostlen;
-	} else { /* CONN_RAW_UDP */
-		size_t datalen;
-		uint8_t buf[64*1024];
-
-		/* minimum length */
-		if (pktlen < RAW_HDR_LEN)
-			return 0;
-		/* should start with header */
-		if (memcmp(pkt, raw_header, RAW_HDR_IDENT_LEN))
-			return 0;
-		/* should be my user id */
-		if (RAW_HDR_GET_USR(pkt) != this.userid)
-			return 0;
-
-		if (RAW_HDR_GET_CMD(pkt) == RAW_HDR_CMD_DATA ||
-		    RAW_HDR_GET_CMD(pkt) == RAW_HDR_CMD_PING)
-			this.lastdownstreamtime = time(NULL);
-
-		/* should be data packet */
-		if (RAW_HDR_GET_CMD(pkt) != RAW_HDR_CMD_DATA)
-			return 0;
-
-		pktlen -= RAW_HDR_LEN;
-		datalen = sizeof(buf);
-		if (uncompress(buf, &datalen, pkt + RAW_HDR_LEN, pktlen) == Z_OK) {
-			write_tun(this.tun_fd, buf, datalen);
-		}
-
-		/* all done */
+	/* Verify HMAC */
+	memset(packet + RAW_HDR_HMAC, 0, RAW_HDR_HMAC_LEN);
+	hmac_md5(hmac, this.hmac_key, 16, *packet, len);
+	if (memcmp(hmac, hmac_pkt, RAW_HDR_HMAC_LEN) != 0) {
+		DEBUG(3, "RX-raw: bad HMAC pkt=0x%016llx%016llx, actual=0x%016llx%016llx (%d)",
+				*(uint64_t*)hmac_pkt, *(uint64_t*)(hmac_pkt+8),
+				*(uint64_t*)hmac, *(uint64_t*)(hmac+8), RAW_HDR_HMAC_LEN);
 		return 0;
 	}
+
+	return 1;
 }
 
-int
-handshake_waitdns(char *buf, size_t buflen, char cmd, int timeout)
+static int
+handshake_waitdns(uint8_t *buf, size_t *buflen, char cmd, int timeout)
 /* Wait for DNS reply fitting to our latest query and returns it.
-   Returns length of reply = #bytes used in buf.
+   *buflen is set to length of reply = #bytes used in buf
+   Returns 1 on success
    Returns 0 if fitting reply happens to be useless.
    Returns -2 on (at least) DNS error that fits to our latest query,
    error message already printed.
@@ -869,11 +726,14 @@ handshake_waitdns(char *buf, size_t buflen, char cmd, int timeout)
    so effective timeout may be longer than specified.
 */
 {
-	struct query q;
-	int r, rv;
+	struct dns_packet *q;
+	struct pkt_metadata m;
+	int r;
 	fd_set fds;
 	struct timeval tv;
 	char qcmd;
+	uint8_t pkt[64*1024];
+	size_t pktlen = sizeof(pkt);
 
 	cmd = toupper(cmd);
 
@@ -889,17 +749,14 @@ handshake_waitdns(char *buf, size_t buflen, char cmd, int timeout)
 		if (r == 0)
 			return -3;	/* select timeout */
 
-		q.id = -1;
-		q.name[0] = '\0';
-		rv = read_dns_withq((uint8_t *)buf, buflen, &q);
+		if (!read_packet(this.dns_fd, pkt, &pktlen, &m))
+			return -1;	/* read error */
 
-		qcmd = toupper(q.name[0]);
-		if (q.id != this.lastid || qcmd != cmd) {
-			DEBUG(1, "Ignoring unfitting reply id %d starting with '%c'", q.id, q.name[0]);
-			continue;
+		if ((q = dns_decode(pkt, pktlen)) == NULL) {
+			return -1;	/* invalid DNS packet */
 		}
 
-		/* if still here: reply matches our latest query */
+		DEBUG(2, "RX: id %5d len=%" L "u name=", q->id, format_host(q->q[0].name, q->q[0].namelen, 0));
 
 		/* Non-recursive DNS servers (such as [a-m].root-servers.net)
 		   return no answer, but only additional and authority records.
@@ -907,40 +764,104 @@ handshake_waitdns(char *buf, size_t buflen, char cmd, int timeout)
 		   NOERROR is such situation. Only trigger on the very first
 		   requests (Y or V, depending if -T given).
 		 */
-		if (rv < 0 && q.rcode == NOERROR &&
-		    (q.name[0] == 'Y' || q.name[0] == 'y' ||
-		     q.name[0] == 'V' || q.name[0] == 'v')) {
+		if (q->rcode == NOERROR && q->ancount == 0) {
 			fprintf(stderr, "Got empty reply. This nameserver may not be resolving recursively, use another.\n");
 			fprintf(stderr, "Try \"iodine [options] %s ns.%s\" first, it might just work.\n",
 				this.topdomain, this.topdomain);
 			return -2;
 		}
 
-		/* If we get an immediate SERVFAIL on the handshake query
-		   we're waiting for, wait a while before sending the next.
-		   SERVFAIL reliably happens during fragsize autoprobe, but
-		   mostly long after we've moved along to some other queries.
-		   However, some DNS relays, once they throw a SERVFAIL, will
-		   for several seconds apply it immediately to _any_ new query
-		   for the same this.topdomain. When this happens, waiting a while
-		   is the only option that works.
-		 */
-		if (rv < 0 && q.rcode == SERVFAIL)
-			sleep(1);
+		size_t decbuflen = *buflen;
+		r = dns_decode_data_answer(q, buf, &decbuflen);
 
-		if (rv < 0) {
-			write_dns_error(&q, 1);
-			return -2;
+		qcmd = toupper(buf[0]);
+		if (r && decbuflen && (q->id != this.lastid || qcmd != cmd)) {
+			DEBUG(1, "Ignoring unfitting reply id %hu starting with '%c'", q->id, buf[0]);
+			continue;
+		} else {
+			/* If we get an immediate SERVFAIL on the handshake query
+			   we're waiting for, wait a while before sending the next.
+			   SERVFAIL reliably happens during fragsize autoprobe, but
+			   mostly long after we've moved along to some other queries.
+			   However, some DNS relays, once they throw a SERVFAIL, will
+			   for several seconds apply it immediately to _any_ new query
+			   for the same this.topdomain. When this happens, waiting a while
+			   is the only option that works.
+			 */
+			if (q->rcode == SERVFAIL)
+				sleep(1);
+			write_dns_error(q, 1);
+				return -2;
 		}
-		/* rv either 0 or >0, return it as is. */
-		return rv;
+
+		/* if still here: reply matches our latest query */\
+		*buflen = decbuflen;
+		return 1;
 	}
 
 	/* not reached */
 	return -1;
 }
 
-int
+static int
+downstream_decode(uint8_t *out, size_t *outlen, uint8_t *encdata, size_t encdatalen)
+/* validate downstream header + HMAC, decode data
+ * note: exact reverse of downstream_encode in server.c
+ * returns 1 on success, <1 with error code */
+{
+	if (encdatalen < 1)
+		return 0;
+
+	size_t hmaclen;
+	uint32_t len;
+	uint8_t flags = b32_8to5(encdata[0]);
+
+	hmaclen = flags & DH_HMAC32 ? 4 : 12;
+
+	if (flags & DH_ERROR) {
+		DEBUG(1, "got DH_ERROR from server! code=%x", flags & 7);
+		/* always 96-bit HMAC when error flag is set */
+		hmaclen = 12;
+		if (flags & DH_HMAC32) {
+			DEBUG(2, "server says 32-bit HMAC with error flag set!");
+		}
+	}
+
+	if (encdatalen < 5 + hmaclen) {
+		/* packet length must at least match flags */
+		return E_BADLEN;
+	}
+
+	/* deconstruct downstream data header
+	 * 4 bytes CMC (network byte order) (random for pre-login responses)
+	 * 4 or 12 bytes HMAC (note: HMAC field is 32-bits random for all pre-login responses)
+	 * for HMAC calculation (in hmacbuf): length + flags + CMC + hmac + data */
+	len = encdatalen;
+	uint8_t hmac[16], hmac_pkt[16], hmacbuf[len + 4], *p;
+	p = hmacbuf;
+
+	putlong(&p, len); /* 4 bytes length */
+	putdata(&p, encdata, encdatalen);
+
+	memcpy(hmac_pkt, hmacbuf + 9, hmaclen);
+	memset(hmacbuf + 9, 0, hmaclen);
+	hmac_md5(hmac, this.hmac_key, 16, hmacbuf, len + 4);
+
+	if (memcmp(hmac, hmac_pkt, hmaclen) != 0) {
+		DEBUG(3, "RX: bad HMAC pkt=%s, actual=%s",
+				tohexstr(hmac_pkt, hmaclen, 0), tohexstr(hmac, hmaclen, 1));
+		return E_BADAUTH;
+	}
+
+	if (!(flags & DH_ERROR)) {
+		*outlen = unpack_data(out, *outlen, encdata, encdatalen, flags & 7);
+		return 1;
+	} else {
+		return -(flags & 7);
+	}
+}
+
+static int
 parse_data(uint8_t *data, size_t len, fragment *f, int *immediate, int *ping)
 {
 	size_t headerlen = DOWNSTREAM_DATA_HDR;
@@ -1068,83 +989,92 @@ tunnel_tun()
 static int
 tunnel_dns()
 {
-	struct query q;
+	struct dns_packet *q;
+	struct pkt_metadata m;
 	size_t datalen, buflen;
 	uint8_t buf[64*1024], cbuf[64*1024], *data, compressed;
 	fragment f;
-	int read, ping, immediate, error, pkt = 1;
+	int ping, immediate, error;
+	char cmd;
 
 	memset(&q, 0, sizeof(q));
 	memset(buf, 0, sizeof(buf));
 	memset(cbuf, 0, sizeof(cbuf));
-	read = read_dns_withq(cbuf, sizeof(cbuf), &q);
 
-	if (this.conn != CONN_DNS_NULL)
-		return 1;  /* everything already done */
+	buflen = sizeof(buf);
+	if (!read_packet(this.dns_fd, buf, &buflen, &m)) {
+		return 0;
+	}
+
+	if (this.conn == CONN_DNS_NULL) {
+		if ((q = dns_decode(buf, buflen)) == NULL)
+			return 0;
+
+		DEBUG(2, "RX: id %5d len=%" L "u name=", q->id, format_host(q->q[0].name, q->q[0].namelen, 0));
+
+		datalen = sizeof(buf);
+		if (!dns_decode_data_answer(q, cbuf, &datalen)) /* cbuf contains data */
+			datalen = 0;
+		buflen = sizeof(buf);
+		if (!downstream_decode(buf, &buflen, cbuf, datalen))
+			buflen = 0;
+		cmd = tolower(q->q[0].name[1]);
+
+	} else { /* CONN_RAW_UDP */
+		uint8_t *data = buf, cmd;
+
+		if (!raw_validate(&data, buflen, &cmd)) {
+			return 0;
+		}
+
+		if (cmd == RAW_HDR_CMD_DATA || cmd == RAW_HDR_CMD_PING)
+			this.lastdownstreamtime = time(NULL);
+
+		/* should be data packet */
+		if (RAW_HDR_GET_CMD(buf) != RAW_HDR_CMD_DATA)
+			return 0;
+
+		buflen -= RAW_HDR_LEN;
+		datalen = sizeof(buf);
+		if (uncompress(cbuf, &datalen, data, buflen) == Z_OK) {
+			write_tun(this.tun_fd, cbuf, datalen);
+		}
+
+		/* all done */
+		return 1;
+	}
 
 	/* Don't process anything that isn't data for us; usually error
 	   replies from fragsize probes etc. However a sequence of those,
 	   mostly 1 sec apart, will continuously break the >=2-second select
 	   timeout, which means we won't send a proper ping for a while.
 	   So make select a bit faster, <1sec. */
-	if (q.name[0] != 'P' && q.name[0] != 'p' &&
-	    q.name[0] != this.userid_char && q.name[0] != this.userid_char2) {
+	if (cmd != 'p' && cmd != this.userid_char) {
 		this.send_ping_soon = 700;
-		got_response(q.id, 0, 0);
+		got_response(q->id, 0, 0);
 		return -1;	/* nothing done */
 	}
 
-	if (read < DOWNSTREAM_DATA_HDR) {
+	if (buflen < DOWNSTREAM_DATA_HDR) {
 		/* Maybe SERVFAIL etc. Send ping to get things back in order,
 		   but wait a bit to prevent fast ping-pong loops.
 		   Only change options if user hasn't specified server timeout */
+		write_dns_error(q, 0);
 
-		if (read < 0)
-			write_dns_error(&q, 0);
-
-		if (q.rcode == SERVFAIL && read < 0) {
-			this.num_servfail++;
-
-			if (this.lazymode) {
-
-				if (this.send_query_recvcnt < 500 && this.num_servfail < 4) {
-					fprintf(stderr, "Hmm, that's %" L "d SERVFAILs. Your data should still go through...\n", this.num_servfail);
-
-				} else if (this.send_query_recvcnt < 500 && this.num_servfail >= 10 &&
-					this.autodetect_server_timeout && this.max_timeout_ms >= 500 && this.num_servfail % 5 == 0) {
-
-					this.max_timeout_ms -= 200;
-					double target_timeout = (float) this.max_timeout_ms / 1000.0;
-					fprintf(stderr, "Too many SERVFAILs (%" L "d), reducing timeout to"
-						" %.1f secs. (use -I%.1f next time on this network)\n",
-							this.num_servfail, target_timeout, target_timeout);
-
-					/* Reset query counts this.stats */
-					this.send_query_sendcnt = 0;
-					this.send_query_recvcnt = 0;
-					update_server_timeout(1);
-
-				} else if (this.send_query_recvcnt < 500 && this.num_servfail >= 40 &&
-					this.autodetect_server_timeout && this.max_timeout_ms < 500) {
-
-					/* last-ditch attempt to fix SERVFAILs - disable lazy mode */
-					immediate_mode_defaults();
-					fprintf(stderr, "Attempting to disable lazy mode due to excessive SERVFAILs\n");
-					handshake_switch_options(0, this.compression_down, this.downenc);
-				}
-			}
+		if (q->rcode == SERVFAIL) {
+			handle_data_servfail();
 		}
 
 		this.send_ping_soon = 900;
 
 		/* Mark query as received */
-		got_response(q.id, 0, 1);
+		got_response(q->id, 0, 1);
 		return -1;	/* nothing done */
 	}
 
 	this.send_query_recvcnt++;  /* unlikely we will ever overflow (2^64 queries is a LOT) */
 
-	if (read == 5 && !strncmp("BADIP", (char *)cbuf, 5)) {
+	if (buflen == 5 && !strncmp("BADIP", (char *)cbuf, 5)) {
 		this.num_badip++;
 		if (this.num_badip % 5 == 1) {
 			fprintf(stderr, "BADIP (%" L "d): Server rejected sender IP address (maybe iodined -c will help), or server "
@@ -1163,9 +1093,9 @@ tunnel_dns()
 	error = parse_data(cbuf, read, &f, &immediate, &ping);
 
 	/* Mark query as received */
-	got_response(q.id, immediate, 0);
+	got_response(q->id, immediate, 0);
 
-	if ((this.debug >= 3 && ping) || (this.debug >= 2 && !ping))
+	if ((debug >= 3 && ping) || (debug >= 2 && !ping))
 		fprintf(stderr, " RX %s; frag ID %3u, ACK %3d, compression %d, datalen %" L "u, s%d e%d\n",
 				ping ? "PING" : "DATA", f.seqID, f.ack_other, f.compressed, f.len, f.start, f.end);
 
@@ -1215,6 +1145,7 @@ tunnel_dns()
 	/* Continue reassembling packets until not possible to do so.
 	 * This prevents a buildup of fully available packets (with one or more fragments each)
 	 * in the incoming window buffer. */
+	size_t pkt = 1;
 	while (pkt == 1) {
 		datalen = sizeof(cbuf);
 		pkt = window_reassemble_data(this.inbuf, cbuf, &datalen, &compressed);
@@ -1281,8 +1212,6 @@ client_tunnel()
 	recv_since_report = 0;
 
 	use_min_send = 0;
-
-	window_debug = this.debug;
 
 	while (this.running) {
 		if (!use_min_send)
@@ -1458,41 +1387,42 @@ client_tunnel()
 	return rv;
 }
 
-static void
-send_upenctest(char *s)
-/* NOTE: String may be at most 63-4=59 chars to fit in 1 dns chunk. */
-{
-	char buf[512] = "zCMC";
-	size_t buf_space = 3;
-	uint32_t cmc = rand();
+/* DEPRECATED */
+//static void
+//send_upenctest(char *s)
+///* NOTE: String may be at most 63-4=59 chars to fit in 1 dns chunk. */
+//{
+//	char buf[512] = "zCMC";
+//	size_t buf_space = 3;
+//	uint32_t cmc = rand();
+//
+//	b32->encode((uint8_t *)buf + 1, &buf_space, (uint8_t *) &cmc, 4);
+//
+//	/* Append test string without changing it */
+//	strncat(buf, ".", 512 - strlen(buf));
+//	strncat(buf, s, 512 - strlen(buf));
+//	strncat(buf, ".", 512 - strlen(buf));
+//	strncat(buf, this.topdomain, 512 - strlen(buf));
+//	send_query(buf, strlen(buf));
+//}
 
-	b32->encode((uint8_t *)buf + 1, &buf_space, (uint8_t *) &cmc, 4);
-
-	/* Append test string without changing it */
-	strncat(buf, ".", 512 - strlen(buf));
-	strncat(buf, s, 512 - strlen(buf));
-	strncat(buf, ".", 512 - strlen(buf));
-	strncat(buf, this.topdomain, 512 - strlen(buf));
-	send_query((uint8_t *)buf);
-}
-
-static void
-send_downenctest(char downenc, int variant)
-{
-	char buf[512] = "yTaCMC.";
-	size_t buf_space = 4;
-
-	buf[1] = tolower(downenc);
-	buf[2] = b32_5to8(variant);
-
-	/* add 3 bytes base32 CMC (random) */
-	uint32_t cmc = rand();
-
-	b32->encode((uint8_t *)buf + 3, &buf_space, (uint8_t *) &cmc, 2);
-	strncat(buf, ".", 512 - strlen(buf));
-	strncat(buf, this.topdomain, 512 - strlen(buf));
-	send_query((uint8_t *)buf);
-}
+//static void
+//send_downenctest(char downenc, int variant)
+//{
+//	uint8_t buf[512] = "yTaCMC.";
+//	size_t buf_space = 4;
+//
+//	buf[1] = tolower(downenc);
+//	buf[2] = b32_5to8(variant);
+//
+//	/* add 3 bytes base32 CMC (random) */
+//	uint32_t cmc = rand();
+//
+//	b32->encode(buf + 3, &buf_space, &cmc, 2);
+//	strncat(buf, ".", 512 - strlen(buf));
+//	strncat(buf, this.topdomain, 512 - strlen(buf));
+//	send_query(buf, strlen(buf));
+//}
 
 static void
 send_version(uint32_t version)
@@ -1507,7 +1437,7 @@ send_version(uint32_t version)
 	build_hostname(buf, sizeof(buf), data, sizeof(data),
 				   this.topdomain, b32, this.hostname_maxlen, 1);
 
-	send_query(buf);
+	send_query(buf, strlen(buf));
 }
 
 static void
@@ -1560,11 +1490,12 @@ send_ip_request()
 }
 
 static void
-send_raw_udp_login(int seed)
+send_raw_udp_login()
 {
 	uint8_t buf[16];
 	get_rand_bytes(buf, sizeof(buf));
-	send_raw(buf, sizeof(buf), RAW_HDR_CMD_LOGIN);
+	send_raw(this.dns_fd, buf, sizeof(buf), this.userid, RAW_HDR_CMD_LOGIN,
+			CMC(this.cmc_up), this.hmac_key, &this.raw_serv, this.raw_serv_len);
 }
 
 static void
@@ -1636,7 +1567,6 @@ static int
 handshake_version(uint8_t *sc)
 {
 	char hex[] = "0123456789abcdef";
-	char hex2[] = "0123456789ABCDEF";
 	char in[4096];
 	uint32_t payload;
 	int i;
@@ -1666,7 +1596,6 @@ handshake_version(uint8_t *sc)
 
 				this.userid = payload;
 				this.userid_char = hex[this.userid & 15];
-				this.userid_char2 = hex2[this.userid & 15];
 
 				DEBUG(2, "Login: sc=0x%016llx%016llx, cmc_up=%u, cmc_dn=%u",
 						*(uint64_t*)sc, *(uint64_t*)(sc+8), this.cmc_up, this.cmc_down);
@@ -1872,7 +1801,8 @@ handshake_upenctest(char *s)
 	slen = strlen(s);
 	for (i=0; this.running && i<3 ;i++) {
 
-		send_upenctest(s);
+		// TODO fix upenctest
+//		send_upenctest(s);
 
 		read = handshake_waitdns(in, sizeof(in), 'Z', i+1);
 
@@ -2033,7 +1963,7 @@ handshake_downenctest(char trycodec)
 
 	for (i=0; this.running && i<3 ;i++) {
 
-		send_downenctest(trycodec, 1);
+//		send_downenctest(trycodec, 1); TODO fix downenctest
 
 		read = handshake_waitdns(in, sizeof(in), 'Y', i+1);
 
@@ -2133,7 +2063,7 @@ handshake_qtypetest(int timeout)
 	   byte values can be returned, which is needed for NULL/PRIVATE
 	   to work. */
 
-	send_downenctest(trycodec, 1);
+//	send_downenctest(trycodec, 1); TODO fix qtypetest
 
 	read = handshake_waitdns(in, sizeof(in), 'Y', timeout);
 
@@ -2260,7 +2190,7 @@ handshake_edns0_check()
 
 	for (i=0; this.running && i<3 ;i++) {
 
-		send_downenctest(trycodec, 1);
+//		send_downenctest(trycodec, 1); TODO fix edns0 check
 
 		read = handshake_waitdns(in, sizeof(in), 'Y', i+1);
 
@@ -2331,7 +2261,8 @@ handshake_switch_codec(int bits)
 			this.dataenc = tempenc;
 
 			/* Update outgoing buffer max (decoded) fragsize */
-			this.maxfragsize_up = get_raw_length_from_dns(this.hostname_maxlen - UPSTREAM_DATA_HDR, this.dataenc, this.topdomain);
+			this.maxfragsize_up = get_raw_length_from_dns(this.hostname_maxlen -
+					UPSTREAM_DATA_HDR, this.dataenc, this.topdomain);
 			return;
 		}
 
@@ -2346,7 +2277,7 @@ codec_revert:
 	fprintf(stderr, "Falling back to upstream codec %s\n", this.dataenc->name);
 }
 
-void
+static void
 handshake_switch_options(int lazy, int compression, char denc)
 {
 	char in[100];
