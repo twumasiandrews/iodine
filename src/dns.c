@@ -97,7 +97,10 @@ dns_packet_create(uint16_t qdcount, uint16_t ancount, uint16_t nscount, uint16_t
 	return p;
 }
 
-#define CHECKLEN(x) if (sizeof(qs->name) < (x) + p-qs->name) return 0
+#define CHECKLEN(x)	if (sizeof(qs->name) < (x) + p-qs->name) { \
+						dns_packet_destroy(q); \
+						return NULL; \
+					}
 
 struct dns_packet *
 dns_encode_data_query(uint16_t qtype, uint8_t *td, uint8_t *data, size_t datalen)
@@ -126,7 +129,10 @@ dns_encode_data_query(uint16_t qtype, uint8_t *td, uint8_t *data, size_t datalen
 }
 #undef CHECKLEN
 
-#define CHECKLEN(x, ann) if (sizeof(q->an[ann].rdata) < (x) + (p-q->an[ann].rdata)) return 0
+#define CHECKLEN(x, ann)	if (sizeof(q->an[ann].rdata) < (x) + (p-q->an[ann].rdata)) { \
+								dns_packet_destroy(q); \
+								return NULL; \
+							}
 
 struct dns_packet *
 dns_encode_data_answer(struct dns_packet *qu, uint8_t *data, size_t datalen)
@@ -137,7 +143,7 @@ dns_encode_data_answer(struct dns_packet *qu, uint8_t *data, size_t datalen)
 {
 	if (qu->qdcount == 0 || qu->qr != QR_QUERY) {
 		/* we need a question */
-		return 0;
+		return NULL;
 	}
 
 	struct dns_packet *q;
@@ -169,7 +175,7 @@ dns_encode_data_answer(struct dns_packet *qu, uint8_t *data, size_t datalen)
 		if (DNS_NUM_LABELS(datalen) + 1 + datalen > sizeof(q->an[0].rdata)) {
 			warnx("cannot encode more than QUERY_RDATA_SIZE (%d)", QUERY_RDATA_SIZE);
 			dns_packet_destroy(q);
-			return 0;
+			return NULL;
 		}
 		p = q->an[0].rdata;
 		/* produce simple rdata with single hostname */
@@ -670,7 +676,7 @@ dns_decode_data_query(struct dns_packet *q, uint8_t *td, uint8_t *out, size_t *o
 	struct dns_question *qs = &q->q[0];
 	/* check topdomain */
 	uint8_t *qtd = qs->name + qs->namelen - HOSTLEN(td);
-	if (memcmp(qtd, td, strlen(td) + 1) != 0) {
+	if (memcmp(qtd, td, HOSTLEN(td)) != 0) {
 		DEBUG(1, "invalid topdomain: %s; expected %s",
 				format_host(qtd, HOSTLEN(td), 0),
 				format_host(td, HOSTLEN(td), 1));
