@@ -169,7 +169,9 @@ dns_encode_data_answer(struct dns_packet *qu, uint8_t *data, size_t datalen)
 
 	memcpy(&q->q[0], &qu->q[0], sizeof(struct dns_question));
 
-	uint8_t *p;
+	uint8_t *p = q->an[0].rdata;
+	q->an[0].type = anstype;
+	q->an[0].qnum = 0;
 	if (anstype == T_CNAME || anstype == T_DNAME ||
 		anstype == T_PTR || anstype == T_A6) {
 		if (DNS_NUM_LABELS(datalen) + 1 + datalen > sizeof(q->an[0].rdata)) {
@@ -177,7 +179,6 @@ dns_encode_data_answer(struct dns_packet *qu, uint8_t *data, size_t datalen)
 			dns_packet_destroy(q);
 			return NULL;
 		}
-		p = q->an[0].rdata;
 		/* produce simple rdata with single hostname */
 		if (anstype == T_A6) {
 			CHECKLEN(1, 0);
@@ -191,6 +192,7 @@ dns_encode_data_answer(struct dns_packet *qu, uint8_t *data, size_t datalen)
 		uint8_t *d = data;
 		for (uint16_t ann = 0; ann < q->ancount; ann++) {
 			q->an[ann].type = anstype;
+			q->an[ann].qnum = 0;
 			p = q->an[ann].rdata;
 			/* preference (both MX & SRV); used for reassembly */
 			CHECKLEN(2, ann);
@@ -211,7 +213,7 @@ dns_encode_data_answer(struct dns_packet *qu, uint8_t *data, size_t datalen)
 		q->an[0].rdlength = puttxtbin(&p, sizeof(q->an[0].rdata), data, datalen);
 	} else { /* NULL or PRIVATE */
 		CHECKLEN(datalen, 0);
-		memcpy(data, q->an[0].rdata, datalen);
+		memcpy(q->an[0].rdata, data, datalen);
 		q->an[0].rdlength = datalen;
 	}
 	return q;
@@ -575,6 +577,7 @@ dns_decode(uint8_t *packet, size_t packetlen)
 
 	return q;
 }
+#undef CHECKLEN
 
 #define CHECKLEN(x) if (a->rdlength < (x) + (p-a->rdata))  return 0
 
