@@ -171,7 +171,7 @@ format_host(uint8_t *host, size_t hostlen, size_t bufnum)
 			buf[i] = INVALID_CHAR;
 		}
 	}
-	buf[len + 1] = 0;
+	buf[len] = 0;
 	return buf;
 }
 
@@ -508,8 +508,8 @@ check_topdomain(char *str, char **errormsg)
 		if (errormsg) *errormsg = "Too short (< 3)";
 		return 1;
 	}
-	if (strlen(str) > 128) {
-		if (errormsg) *errormsg = "Too long (> 128)";
+	if (strlen(str) >= 128) {
+		if (errormsg) *errormsg = "Too long (>= 128)";
 		return 1;
 	}
 

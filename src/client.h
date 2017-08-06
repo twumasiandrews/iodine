@@ -53,7 +53,7 @@ struct client_instance {
 	int current_nameserver;
 	struct sockaddr_storage raw_serv;
 	int raw_serv_len;
-	uint8_t *topdomain; /* topdomain in DNS-encoded form */
+	uint8_t topdomain[128]; /* topdomain in DNS-encoded form */
 
 	/* Remote TCP forwarding stuff (for -R) */
 	struct sockaddr_storage remote_forward_addr;

@@ -62,7 +62,7 @@ extern const unsigned char raw_header[RAW_HDR_LEN];
 #define C_BASE128	0x4 // 'V'
 
 #define C_CHAR2NUM(c)	((toupper(c) - 'R') & 7)
-#define C_NUM2CHAR(n)	((n & 7 + 'R')
+#define C_NUM2CHAR(n)	((n) & 7 + 'R')
 
 /* Error codes */
 #define E_BADLEN	0x0
