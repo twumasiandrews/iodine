@@ -37,7 +37,7 @@
 
 #include "common.h"
 #include "version.h"
-
+#include "read.h"
 #include "dns.h"
 #include "encoding.h"
 #include "base32.h"
@@ -64,6 +64,10 @@ WSADATA wsa_data;
 #else
 #include <err.h>
 #endif
+
+/* special flags for write_dns */
+#define WD_AUTO (1 << 5)
+#define WD_OLD	(1 << 6)
 
 /* Ringbuffer Query Handling (qmem) and DNS Cache:
    This is used to make the handling duplicates and query timeouts simpler
@@ -384,34 +388,28 @@ forward_query(int bind_fd, struct dns_packet *q, uint8_t *pkt, size_t pktlen)
 static void
 send_version_response(int fd, version_ack_t ack, uint32_t payload, int userid, struct query *q)
 {
-	uint8_t out[28];
+	uint8_t out[28], *p = out, flags = C_BASE32;
 	size_t len = sizeof(out);
-	memset(out, 0, len);
-	char *s;
-	switch (ack) {
-	case VERSION_ACK:
-		s = "VACK";
-		memcpy(out + 8, users[userid].server_chall, 16);
-		*(uint32_t *) (out + 24) = htonl(CMC(users[userid].cmc_down));
-	break;
-	case VERSION_FULL:
-		s = "VFUL";
-		len = 9; // len == 9 for backwards compatibility
-		break;
-	case VERSION_NACK:
-	default:
-		s = "VNAK";
-		len = 9;
-		break;
+	if (ack == VERSION_ACK) {
+		putdata(&p, "VACK", 4);
+		putlong(&p, payload);
+		putdata(&p, users[userid].server_chall, 16);
+		putlong(&p, CMC(users[userid].cmc_down));
+	} else if (ack == VERSION_FULL) {
+		putdata(&p, "VFUL", 4);
+		putlong(&p, payload);
+	} else { /* (ack == VERSION_NACK): backwards compatible */
+		putdata(&p, "VNAK", 4);
+		putlong(&p, payload);
+		putbyte(&p, 0);
+		flags = WD_OLD;
 	}
-	memcpy(out, s, 4);
-	*(uint32_t *) (out + 4) = htonl(payload);
 
-	write_dns(fd, q, -1, out, len, C_BASE32);
+	write_dns(fd, q, -1, out, (p - out), flags);
 }
 
 static void
-send_data_or_ping(int userid, struct query *q, int ping, int immediate, char *tcperror)
+send_data_or_ping(int userid, struct dns_packet *q, int ping, int immediate, char *tcperror)
 /* Sends current fragment to user, or a ping if no data available.
    ping: 1=force send ping (even if data available), 0=only send if no data.
    immediate: 1=not from qmem (ie. fresh query), 0=query is from qmem
@@ -485,7 +483,7 @@ send_data_or_ping(int userid, struct query *q, int ping, int immediate, char *tc
 		memcpy(pkt + headerlen, f->data, datalen);
 	}
 
-	write_dns(get_dns_fd(&server.dns_fds, &q->from), q, userid, pkt,
+	write_dns(get_dns_fd(&server.dns_fds, &q->m.from), q, userid, pkt,
 			  datalen + headerlen, u->downenc | DH_HMAC32);
 
 	/* mark query as answered */
@@ -696,6 +694,7 @@ tunnel_dns(int dns_fd)
 	DEBUG(3, "RX: client %s ID %5d, type %d, name %s", format_addr(&m.from, m.fromlen),
 			q->id, q->q[0].type, format_host(q->q[0].name, q->q[0].namelen, 0));
 
+	memcpy(&q->m, &m, sizeof(m));
 	if (dns_decode_data_query(q, server.topdomain, encdata, &encdatalen)) {
 		/* inside our topdomain: is a query we can handle */
 
@@ -1055,11 +1054,8 @@ downstream_encode(uint8_t *out, size_t *outlen, uint8_t *data,
 	return 1;
 }
 
-#define WD_AUTO (1 << 5)
-#define WD_OLD	(1 << 6)
-
 static void
-write_dns(int fd, struct query *q, int userid, uint8_t *data, size_t datalen, uint8_t flags)
+write_dns(int fd, struct dns_packet *q, int userid, uint8_t *data, size_t datalen, uint8_t flags)
 {
 	uint8_t buf[64*1024], tmpbuf[64*1024];
 	size_t len = 0;
@@ -1071,8 +1067,28 @@ write_dns(int fd, struct query *q, int userid, uint8_t *data, size_t datalen, ui
 		flags = users[userid].downenc;
 	}
 
-	len = sizeof(tmpbuf);
-	downstream_encode(tmpbuf, &len, data, datalen, userid, flags);
+	uint16_t qtype = q->q[0].type;
+	if (flags & WD_OLD) {
+		uint8_t codec = C_BASE32, *datap;
+		len = 1;
+		if (qtype == T_TXT) {
+			datap = tmpbuf + 1;
+			tmpbuf[0] = 't'; /* base32 for TXT only */
+		} else if (qtype == T_SRV || qtype == T_MX ||
+			qtype == T_CNAME || qtype == T_A ||	qtype == T_PTR ||
+			qtype == T_AAAA || qtype == T_A6 || qtype == T_DNAME) {
+			datap = tmpbuf + 1;
+			tmpbuf[0] = 'h'; /* base32 */
+		} else { /* if (qtype == T_NULL || qtype == T_PRIVATE) */
+			codec = C_RAW; /* no encoding char */
+			datap = tmpbuf;
+			len = 0;
+		}
+		len += encode_data(datap, sizeof(tmpbuf) - 1, data, datalen, codec);
+	} else {
+		len = sizeof(tmpbuf);
+		downstream_encode(tmpbuf, &len, data, datalen, userid, flags);
+	}
 
 	struct dns_packet *ans;
 	ans = dns_encode_data_answer(q, tmpbuf, len);
@@ -1089,9 +1105,10 @@ write_dns(int fd, struct query *q, int userid, uint8_t *data, size_t datalen, ui
 	}
 
 	DEBUG(3, "TX: client %s ID %5d, %" L "u bytes data, type %d, name '%10s'",
-			format_addr(&q->from, q->fromlen), q->id, datalen, q->type, q->name);
+			format_addr(&q->m.from, q->m.fromlen), q->id, datalen, qtype,
+			format_host(q->q[0].name, q->q[0].namelen, 0));
 
-	sendto(fd, buf, len, 0, (struct sockaddr*)&q->from, q->fromlen);
+	sendto(fd, buf, len, 0, (struct sockaddr*)&q->m.from, q->m.fromlen);
 }
 
 // TODO send error codes
@@ -1178,38 +1195,14 @@ handle_dns_version(int dns_fd, struct dns_packet *q, uint8_t *encdata, size_t en
 }
 
 static void
-handle_dns_downstream_codec_check(int dns_fd, struct query *q, uint8_t *domain, int domain_len)
+handle_dns_downstream_codec_check(int dns_fd, struct dns_packet *q, uint8_t *encdata, size_t encdatalen)
+/* this is a stub handler for deprecated command Y */
 {
-	char *datap;
-	int datalen, i, codec;
+	/* here the content of the query is ignored, and the answer is given solely
+	 * based on the query type for basic backwards compatibility
+	 * this works since the client always respects the server's downstream codec */
 
-	i = b32_8to5(domain[2]); /* check variant: second char in b32 */
-
-	if (i == 1) {
-		datap = DOWNCODECCHECK1;
-		datalen = DOWNCODECCHECK1_LEN;
-	} else {
-		write_dns(dns_fd, q, -1, NULL, 0, DH_ERR(BADLEN));
-		return;
-	}
-
-	/* codec to test: first char raw */
-	codec = C_CHAR2NUM(domain[1]);
-	if (q->type == T_TXT ||
-		q->type == T_SRV || q->type == T_MX ||
-		q->type == T_CNAME || q->type == T_A ||
-		q->type == T_PTR || q->type == T_AAAA ||
-		q->type == T_A6 || q->type == T_DNAME) {
-		write_dns(dns_fd, q, -1, datap, datalen, codec);
-		return;
-	}
-	if (q->type == T_NULL || q->type == T_TXT) {
-		write_dns(dns_fd, q, -1, datap, datalen, C_RAW);
-		return;
-	}
-
-	/* if still here, then codec not available */
-	write_dns(dns_fd, q, -1, NULL, 0, DH_ERR(BADOPTS));
+	write_dns(dns_fd, q, -1, DOWNCODECCHECK1, DOWNCODECCHECK1_LEN, WD_OLD);
 }
 
 
@@ -1664,11 +1657,6 @@ handle_null_request(int dns_fd, struct dns_packet *q, uint8_t *encdata, size_t e
 	 * TODO make replies also backwards compatible (without HMAC/codec bits) */
 	if (cmd == 'V') { /* Version check - before userid is assigned */
 		handle_dns_version(dns_fd, q, encdata, encdatalen);
-		return;
-	}
-	else if (cmd == 'Z') { /* Upstream codec check - user independent */
-		/* Reply with received hostname as data (encoded in base32) */
-		write_dns(dns_fd, q, -1, encdata, encdatalen, C_BASE32);
 		return;
 	}
 	else if (cmd == 'Y') { /* Downstream codec check - user independent */

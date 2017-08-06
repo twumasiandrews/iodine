@@ -75,7 +75,7 @@ struct dnsfd {
 struct server_instance {
 	/* Global server variables */
 	int running;
-	char *topdomain;
+	uint8_t topdomain[128];
 	uint8_t passwordmd5[16];
 	int check_ip;
 	int my_mtu;
@@ -141,12 +141,12 @@ int server_tunnel();
 
 static int raw_decode(uint8_t *packet, size_t len, struct pkt_metadata *q, int dns_fd);
 static int read_dns(int fd, struct dns_packet *q);
-static void write_dns(int fd, struct query *q, int userid, uint8_t *data, size_t datalen, uint8_t flags);
+static void write_dns(int fd, struct dns_packet *q, int userid, uint8_t *data, size_t datalen, uint8_t flags);
 static void handle_full_packet(int userid, uint8_t *data, size_t len, int);
 static void handle_null_request(int dns_fd, struct dns_packet *q, uint8_t *encdata, size_t encdatalen);
 static void handle_ns_request(int dns_fd, struct dns_packet *q);
 static void handle_a_request(int dns_fd, struct dns_packet *q, int fakeip);
 
-static void send_data_or_ping(int, struct query *, int, int, char*);
+static void send_data_or_ping(int, struct dns_packet *, int, int, char*);
 
 #endif /* __SERVER_H__ */
