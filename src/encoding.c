@@ -20,8 +20,12 @@
 #endif
 
 #include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+
 #include "common.h"
 #include "encoding.h"
+#include "read.h"
 #include "base32.h"
 #include "base64.h"
 #include "base64u.h"
@@ -212,4 +216,104 @@ unpack_data(uint8_t *buf, size_t buflen, uint8_t *data, size_t datalen, uint8_t 
 
 	return enc->decode(buf, &buflen, data, datalen);
 }
+
+int
+downstream_encode(uint8_t *out, size_t *outlen, uint8_t *data, size_t datalen,
+				uint8_t *hmac_key, uint8_t flags, uint32_t cmc)
+/* Adds downstream header (flags+CMC+HMAC) to given data and encode
+ * returns #bytes that were encoded */
+{
+	size_t hmaclen;
+	uint32_t len;
+
+	if (flags & DH_ERROR) {
+		if (flags & DH_HMAC32) {
+			/* always 96-bit HMAC when error flag is set */
+			flags ^= DH_HMAC32;
+		}
+	}
+	hmaclen = flags & DH_HMAC32 ? 4 : 12;
+	if (*outlen < 5 + hmaclen + datalen) {
+		return 0;
+	}
+
+	/* construct downstream data header
+	 * 4 bytes CMC (network byte order) (random for pre-login responses)
+	 * 4 or 12 bytes HMAC (note: HMAC field is 32-bits random for all pre-login responses)
+	 * for HMAC calculation (in hmacbuf): length + flags + CMC + hmac + data */
+	len = 4 + 1 + 4 + hmaclen + datalen;
+	uint8_t hmac[16], hmacbuf[len];
+
+	*(uint32_t *) hmacbuf = htonl(len);
+	out[0] = hmacbuf[4] = b32_5to8(flags);
+	*(uint32_t *) (hmacbuf + 5) = htonl(cmc);
+	memcpy(hmacbuf + 9 + hmaclen, data, datalen);
+
+	memset(hmacbuf + 9, 0, hmaclen);
+	hmac_md5(hmac, hmac_key, 16, hmacbuf, len);
+	memcpy(hmacbuf + 9, hmac, hmaclen);
+
+	/* now encode data from hmacbuf (not including flags and length, +0 terminator) */
+	*outlen = encode_data(out + 1, *outlen - 2, hmacbuf + 5, len - 5, flags & 7);
+	return 1;
+}
+
+int
+downstream_decode(uint8_t *out, size_t *outlen, uint8_t *encdata, size_t encdatalen, uint8_t *hmac_key)
+/* validate downstream header + HMAC, decode data
+ * note: exact reverse of downstream_encode
+ * returns 1 on success, <1 with error code */
+{
+	if (encdatalen < 1)
+		return 0;
+
+	size_t hmaclen;
+	uint32_t len;
+	uint8_t flags = b32_8to5(encdata[0]);
+
+	hmaclen = flags & DH_HMAC32 ? 4 : 12;
+
+	if (flags & DH_ERROR) {
+		DEBUG(1, "got DH_ERROR from server! code=%x", flags & 7);
+		/* always 96-bit HMAC when error flag is set */
+		hmaclen = 12;
+		if (flags & DH_HMAC32) {
+			DEBUG(2, "server says 32-bit HMAC with error flag set!");
+		}
+	}
+
+	if (encdatalen < 5 + hmaclen) {
+		/* packet length must at least match flags */
+		return E_BADLEN;
+	}
+
+	/* deconstruct downstream data header
+	 * 4 bytes CMC (network byte order) (random for pre-login responses)
+	 * 4 or 12 bytes HMAC (note: HMAC field is 32-bits random for all pre-login responses)
+	 * for HMAC calculation (in hmacbuf): length + flags + CMC + hmac + data */
+	len = encdatalen;
+	uint8_t hmac[16], hmac_pkt[16], hmacbuf[len + 4], *p;
+	p = hmacbuf;
+
+	putlong(&p, len); /* 4 bytes length */
+	putdata(&p, encdata, encdatalen);
+
+	memcpy(hmac_pkt, hmacbuf + 9, hmaclen);
+	memset(hmacbuf + 9, 0, hmaclen);
+	hmac_md5(hmac, hmac_key, 16, hmacbuf, len + 4);
+
+	if (memcmp(hmac, hmac_pkt, hmaclen) != 0) {
+		DEBUG(3, "RX: bad HMAC pkt=%s, actual=%s",
+				tohexstr(hmac_pkt, hmaclen, 0), tohexstr(hmac, hmaclen, 1));
+		return E_BADAUTH;
+	}
+
+	if (!(flags & DH_ERROR)) {
+		*outlen = unpack_data(out, *outlen, encdata, encdatalen, flags & 7);
+		return 1;
+	} else {
+		return -(flags & 7);
+	}
+}
+
 
