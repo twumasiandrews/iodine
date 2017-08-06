@@ -651,7 +651,6 @@ main(int argc, char **argv)
 	} else if (argc > 1)
 		for (int h = 0; h < this.nameserv_hosts_len; h++)
 			this.nameserv_hosts[h] = strdup(argv[h + 1]);
-	this.topdomain = strdup(argv[0]);
 
 	for (int n = 0; n < this.nameserv_hosts_len; n++) {
 		nameserv_host = this.nameserv_hosts[n];
@@ -680,10 +679,14 @@ main(int argc, char **argv)
 		/* NOTREACHED */
 	}
 
-	if(check_topdomain(this.topdomain, &errormsg)) {
+	char *topdomain = argv[1];
+	if(check_topdomain(topdomain, &errormsg)) {
 		warnx("Invalid topdomain: %s", errormsg);
 		usage();
 		/* NOTREACHED */
+	} else {
+		uint8_t *p = this.topdomain;
+		putname(&p, sizeof(this.topdomain), topdomain, strlen(topdomain), 0);
 	}
 
 	int max_ws = MAX_SEQ_ID / 2;
@@ -769,7 +772,7 @@ main(int argc, char **argv)
 	signal(SIGINT, sighandler);
 	signal(SIGTERM, sighandler);
 
-	fprintf(stderr, "Sending DNS queries for %s to ", this.topdomain);
+	fprintf(stderr, "Sending DNS queries for %s to ", format_host(this.topdomain, HOSTLEN(this.topdomain), 0));
 	for (int a = 0; a < this.nameserv_addrs_count; a++)
 		fprintf(stderr, "%s%s", format_addr(&this.nameserv_addrs[a].addr, this.nameserv_addrs[a].len),
 				(a != this.nameserv_addrs_count - 1) ?  ", " : "");

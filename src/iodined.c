@@ -57,6 +57,7 @@
 #include <syslog.h>
 #endif
 
+#include "read.h"
 #include "dns.h"
 #include "encoding.h"
 #include "base32.h"
@@ -447,11 +448,14 @@ main(int argc, char **argv)
 		usage();
 	}
 
-	server.topdomain = strdup(argv[1]);
-	if(check_topdomain(server.topdomain, &errormsg)) {
+	char *topdomain = argv[1];
+	if(check_topdomain(topdomain, &errormsg)) {
 		warnx("Invalid topdomain: %s", errormsg);
 		usage();
 		/* NOTREACHED */
+	} else {
+		uint8_t *p = server.topdomain;
+		putname(&p, sizeof(server.topdomain), topdomain, strlen(topdomain), 0);
 	}
 
 	if (username != NULL) {
@@ -552,7 +556,7 @@ main(int argc, char **argv)
 	}
 	/* hash password */
 	md5_init(&md);
-	md5_append(&md, password, (size_t)strlen(password));
+	md5_append(&md, (uint8_t *) password, strlen(password));
 	md5_finish(&md, server.passwordmd5);
 
 	memset(password, 0, strlen(password));
@@ -635,7 +639,7 @@ main(int argc, char **argv)
 		fprintf(stderr, "Limiting to %d simultaneous users because of netmask /%d\n",
 			created_users, server.netmask);
 	}
-	fprintf(stderr, "Listening to dns for domain %s\n", server.topdomain);
+	fprintf(stderr, "Listening to dns for domain %s\n", format_host(server.topdomain, HOSTLEN(server.topdomain), 0));
 
 	if (foreground == 0)
 		do_detach();
