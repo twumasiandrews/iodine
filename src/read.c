@@ -48,6 +48,7 @@ readname_loop(uint8_t *packet, size_t packetlen, uint8_t **src, uint8_t *dst,
 		labellen = *s++;
 		if (raw) {
 			*d++ = labellen;
+			len++;
 		}
 
 		/* is this a compressed label? */
@@ -87,18 +88,20 @@ readname_loop(uint8_t *packet, size_t packetlen, uint8_t **src, uint8_t *dst,
 			labellen--;
 		}
 
-		if (len >= length || packetlen - (s - packet) < 1) {
+		if (len >= length - 1 || packetlen - (s - packet) < 1) {
 			break; /* We used up all space */
 		}
 
-		if (!bin && *s != 0) {
+		if (!(bin || raw) && *s != 0) {
 			*d++ = DOT_CHAR;
 			len++;
 		}
 	}
 
 end:
-	(*src) = s+1;
+	*d++ = *s++;
+	len++;
+	(*src) = s;
 	return len;
 }
 
