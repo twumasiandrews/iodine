@@ -54,6 +54,11 @@ struct encoder {
 	size_t (*get_raw_length)(size_t);
 };
 
+#define DDERR_BADHMAC	(1 << 10)
+#define DDERR_TOOSHORT	(1 << 9)
+#define DDERR_IS_ANS	(1 << 8)
+extern int downstream_decode_err;
+
 size_t get_raw_length_from_dns(size_t enc_bytes, struct encoder *enc, const uint8_t *topdomain);
 size_t get_encoded_dns_length(size_t raw_bytes, struct encoder *enc, const uint8_t *topdomain);
 

@@ -24,6 +24,8 @@
 #include <stdio.h>
 
 #include "common.h"
+#include "dns.h"
+#include "hmac_md5.h"
 #include "encoding.h"
 #include "read.h"
 #include "base32.h"
@@ -250,69 +252,87 @@ downstream_encode(uint8_t *out, size_t *outlen, uint8_t *data, size_t datalen,
 	memcpy(hmacbuf + 9 + hmaclen, data, datalen);
 
 	memset(hmacbuf + 9, 0, hmaclen);
-	hmac_md5(hmac, hmac_key, 16, hmacbuf, len);
+	if (hmac_key) {
+		hmac_md5(hmac, hmac_key, 16, hmacbuf, len);
+	} else {
+		get_rand_bytes(hmac, sizeof(hmac));
+	}
 	memcpy(hmacbuf + 9, hmac, hmaclen);
 
 	/* now encode data from hmacbuf (not including flags and length, +0 terminator) */
-	*outlen = encode_data(out + 1, *outlen - 2, hmacbuf + 5, len - 5, flags & 7);
+	*outlen = encode_data(out + 1, *outlen - 2, hmacbuf + 5, len - 5, flags & 7) + 1;
 	return 1;
 }
+
+int downstream_decode_err;
 
 int
 downstream_decode(uint8_t *out, size_t *outlen, uint8_t *encdata, size_t encdatalen, uint8_t *hmac_key)
 /* validate downstream header + HMAC, decode data
  * note: exact reverse of downstream_encode
- * returns 1 on success, <1 with error code */
+ * returns 1 on success, 0 with error and sets downstream_decode_err to error code */
 {
-	if (encdatalen < 1)
+	if (encdatalen < 2)
 		return 0;
 
 	size_t hmaclen;
 	uint32_t len;
-	uint8_t flags = b32_8to5(encdata[0]);
+	uint8_t flags = b32_8to5(encdata[0]), error;
 
 	hmaclen = flags & DH_HMAC32 ? 4 : 12;
 
 	if (flags & DH_ERROR) {
 		DEBUG(1, "got DH_ERROR from server! code=%x", flags & 7);
 		/* always 96-bit HMAC when error flag is set */
-		hmaclen = 12;
-		if (flags & DH_HMAC32) {
+		error = flags & 7;
+		if (hmaclen == 4) {
 			DEBUG(2, "server says 32-bit HMAC with error flag set!");
+			downstream_decode_err = DDERR_BADHMAC;
+			return 0;
 		}
-	}
-
-	if (encdatalen < 5 + hmaclen) {
-		/* packet length must at least match flags */
-		return E_BADLEN;
+		flags = C_BASE32; /* HMAC and CMC are still present with error */
 	}
 
 	/* deconstruct downstream data header
 	 * 4 bytes CMC (network byte order) (random for pre-login responses)
 	 * 4 or 12 bytes HMAC (note: HMAC field is 32-bits random for all pre-login responses)
 	 * for HMAC calculation (in hmacbuf): length + flags + CMC + hmac + data */
-	len = encdatalen;
-	uint8_t hmac[16], hmac_pkt[16], hmacbuf[len + 4], *p;
-	p = hmacbuf;
+	uint8_t hmac[16], hmac_pkt[16], hmacbuf[encdatalen + 4], *p;
 
-	putlong(&p, len); /* 4 bytes length */
-	putdata(&p, encdata, encdatalen);
-
-	memcpy(hmac_pkt, hmacbuf + 9, hmaclen);
-	memset(hmacbuf + 9, 0, hmaclen);
-	hmac_md5(hmac, hmac_key, 16, hmacbuf, len + 4);
-
-	if (memcmp(hmac, hmac_pkt, hmaclen) != 0) {
-		DEBUG(3, "RX: bad HMAC pkt=%s, actual=%s",
-				tohexstr(hmac_pkt, hmaclen, 0), tohexstr(hmac, hmaclen, 1));
-		return E_BADAUTH;
+	/* decode data first */
+	len = unpack_data(hmacbuf + 5, encdatalen - 1,
+			encdata + 1, encdatalen - 1, flags & 7);
+	if (len < 4 + hmaclen) {
+		/* packet length must at least match flags */
+		downstream_decode_err = DDERR_TOOSHORT;
+		return 0;
 	}
 
+	if (hmac_key) {
+		p = hmacbuf;
+		putlong(&p, len); /* 4 bytes length */
+		hmacbuf[4] = encdata[4]; /* encoded flags byte */
+		memcpy(hmac_pkt, hmacbuf + 9, hmaclen); /* copy packet HMAC */
+		memset(hmacbuf + 9, 0, hmaclen); /* clear HMAC field */
+		hmac_md5(hmac, hmac_key, 16, hmacbuf, len + 4); /* calculate HMAC */
+		if (memcmp(hmac, hmac_pkt, hmaclen) != 0) { /* verify */
+			DEBUG(3, "RX: bad HMAC pkt=%s, actual=%s",
+					tohexstr(hmac_pkt, hmaclen, 0), tohexstr(hmac, hmaclen, 1));
+			downstream_decode_err = DDERR_BADHMAC;
+			return 0;
+		}
+	}
+	if (*outlen < len - 4 - hmaclen) {
+		return 0;
+	}
+	memcpy(out, hmacbuf + 9 + hmaclen, len - 4 - hmaclen);
+	*outlen = len - 4 - hmaclen;
+
 	if (!(flags & DH_ERROR)) {
-		*outlen = unpack_data(out, *outlen, encdata, encdatalen, flags & 7);
 		return 1;
 	} else {
-		return -(flags & 7);
+		downstream_decode_err = error | DDERR_IS_ANS;
+		return 0;
 	}
 }
 
