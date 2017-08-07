@@ -679,7 +679,7 @@ main(int argc, char **argv)
 		/* NOTREACHED */
 	}
 
-	char *topdomain = argv[1];
+	char *topdomain = argv[0];
 	if(check_topdomain(topdomain, &errormsg)) {
 		warnx("Invalid topdomain: %s", errormsg);
 		usage();
@@ -786,6 +786,8 @@ main(int argc, char **argv)
 		retval = 1;
 		goto cleanup;
 	}
+
+	// TODO request data connection here.
 
 	if (this.conn == CONN_RAW_UDP) {
 		fprintf(stderr, "Sending raw UDP traffic directly to %s\n", client_get_raw_addr());
