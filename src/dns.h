@@ -25,7 +25,7 @@
 
 /* Don't push the limit with DNS servers: potentially unwanted behaviour
  * if labels are all 63 chars long (DNS standard max label length) */
-#define DNS_MAXLABEL		59
+#define DNS_MAXLABEL		17
 
 #define DNS_NUM_LABELS(hl)	(((hl) + DNS_MAXLABEL - 1) / DNS_MAXLABEL)
 
@@ -33,7 +33,7 @@
 #define DNS_MAX_NUM_LABELS		DNS_NUM_LABELS(QUERY_NAME_SIZE)
 #define DNS_MAX_HOST_DATA		(QUERY_NAME_SIZE - DNS_MAX_NUM_LABELS)
 
-#define DNS_HOSTLEN(rawlen)		((rawlen) + DNS_NUM_LABELS(rawlen))
+#define DNS_HOSTLEN(rawlen)		((rawlen) + DNS_NUM_LABELS(rawlen) + 1)
 #define DNS_TXTRDLEN(rawlen)	(rawlen + (rawlen / DNS_MAXCHARSTR + 1))
 
 #define T_PRIVATE 65399

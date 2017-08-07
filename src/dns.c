@@ -118,12 +118,12 @@ dns_encode_data_query(uint16_t qtype, uint8_t *td, uint8_t *data, size_t datalen
 	q->rcode = NOERROR;
 
 	uint8_t *p = qs->name;
-	CHECKLEN(DNS_HOSTLEN(datalen) + strlen(td));
+	CHECKLEN(DNS_HOSTLEN(datalen) + HOSTLEN(td) - 1);
 	size_t hostlen = putname(&p, sizeof(qs->name), data, datalen, 1) - 1;
 
 	/* overwrite root label with topdomain */
 	p--;
-	hostlen += putdata(&p, (uint8_t *) td, strlen(td) + 1);
+	hostlen += putdata(&p, td, HOSTLEN(td));
 	qs->namelen = hostlen;
 	return q;
 }
@@ -185,7 +185,7 @@ dns_encode_data_answer(struct dns_packet *qu, uint8_t *data, size_t datalen)
 			/* A6 prefix len = 128 (no address suffix); see RFC 2874 */
 			putbyte(&p, 128);
 		}
-		putname(&p, q->an[0].rdlength - (p - q->an[0].rdata), data, datalen, 1);
+		q->an[0].rdlength = putname(&p, sizeof(q->an[0].rdata) - (p - q->an[0].rdata), data, datalen, 1);
 	} else if (anstype == T_MX || anstype == T_SRV) {
 		size_t rdhostlen = datalen / q->ancount + 1;
 		size_t remain = datalen;
@@ -204,9 +204,8 @@ dns_encode_data_answer(struct dns_packet *qu, uint8_t *data, size_t datalen)
 				putshort(&p, 5060); /* 16 bits port (5060 = SIP) */
 			}
 			CHECKLEN(DNS_HOSTLEN(rdhostlen), ann);
-			putname(&p, sizeof(q->an[ann].rdata) - (p - q->an[0].rdata),
-					data, datalen, 1);
-			q->an[ann].rdlength = p - q->an[ann].rdata;
+			q->an[ann].rdlength = putname(&p, sizeof(q->an[ann].rdata) -
+					(p - q->an[ann].rdata), data, datalen, 1);
 		}
 	} else if (anstype == T_TXT) {
 		CHECKLEN(DNS_TXTRDLEN(datalen), 0);
@@ -242,6 +241,9 @@ dns_encode_rr(uint8_t *buf, uint8_t **dst, size_t buflen, struct dns_rr *a, uint
 	*dst = p;
 	return p - buf;
 }
+#undef CHECKLEN
+
+#define CHECKLEN(x) if (*buflen < (x) + (unsigned)(p-buf))  return 0
 
 int
 dns_encode(uint8_t *buf, size_t *buflen, struct dns_packet *q)
@@ -327,6 +329,9 @@ dns_encode(uint8_t *buf, size_t *buflen, struct dns_packet *q)
 	*buflen = len;
 	return 1;
 }
+#undef CHECKLEN
+
+#define CHECKLEN(x) if (buflen < (x) + (unsigned)(p-buf))  return 0
 
 size_t
 dns_encode_ns_response(uint8_t *buf, size_t buflen, struct dns_packet *q, uint8_t *topdomain)
@@ -344,7 +349,7 @@ dns_encode_ns_response(uint8_t *buf, size_t buflen, struct dns_packet *q, uint8_
 	memset(buf, 0, buflen);
 
 	// TODO not null-terminated strings
-	domain_len = (q->q[0].name) - HOSTLEN(topdomain);
+	domain_len = q->q[0].namelen - HOSTLEN(topdomain);
 	uint8_t *qtd = q->q[0].name + domain_len;
 	if (domain_len <= 1)
 		return 0;
@@ -687,7 +692,8 @@ dns_decode_data_query(struct dns_packet *q, uint8_t *td, uint8_t *out, size_t *o
 	}
 
 	uint8_t *p = qs->name;
-	size_t len = readname(qs->name, qs->namelen, &p, out, *outlen, 1, 0);
+	/* read everything up to but not including topdomain as data */
+	size_t len = readname(qs->name, qs->namelen - HOSTLEN(td), &p, out, *outlen, 1, 0);
 	*outlen = len;
 	return 1;
 }
