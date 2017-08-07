@@ -88,7 +88,7 @@ readname_loop(uint8_t *packet, size_t packetlen, uint8_t **src, uint8_t *dst,
 			labellen--;
 		}
 
-		if (len >= length - 1 || packetlen - (s - packet) < 1) {
+		if (len >= length - 1 || packetlen - (s - packet) <= 1) {
 			break; /* We used up all space */
 		}
 
@@ -192,14 +192,14 @@ putname(uint8_t **buf, size_t buflen, uint8_t *host, size_t hostlen, int bin)
  * when needed. Otherwise labels correspond to dots in host. */
 {
 	uint8_t *p, *labelprefix, *h;
-	size_t len = 0, total = 0, hpos = 0;
+	size_t len = 0;
 
 	labelprefix = p = *buf;
 	h = host;
 	p++;
 
-	while (1) {
-		if (((*h == DOT_CHAR && !bin) || (len == DNS_MAXLABEL && bin)) || hpos >= hostlen) {
+	while ((h - host) < hostlen) {
+		if ((*h == DOT_CHAR && !bin) || (len == DNS_MAXLABEL && bin)) {
 			if (!bin) {
 				h++;
 			}
@@ -211,21 +211,21 @@ putname(uint8_t **buf, size_t buflen, uint8_t *host, size_t hostlen, int bin)
 			len++;
 		}
 
-		if (len > 63 || total >= buflen) {
+		if (len > 63 || (p - *buf) >= buflen) {
 			/* invalid hostname or buffer too small */
 			return 0;
 		}
-		hpos++;
-		total++;
-		if (hpos > hostlen) {
-			break;
-		}
+	}
+
+	if (len) {
+		*labelprefix = (uint8_t) len & 0x3F;
 	}
 
 	*p++ = 0; /* add root label (len=0) */
+	size_t total = p - *buf;
 	*buf = p;
 
-	return total + 1;
+	return total;
 }
 
 size_t
