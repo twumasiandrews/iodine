@@ -378,7 +378,8 @@ send_query(uint8_t *encdata, size_t encdatalen)
 		return -1;
 	}
 
-	DEBUG(3, "TX: Qid %5d len %" L "u: hostname '%.*s'", q->id, encdatalen, (int)encdatalen, encdata);
+	DEBUG(3, "TX: id %5d len %" L "u: hostname '%s'", q->id, encdatalen,
+			format_host(q->q[0].name, q->q[0].namelen, 0));
 
 	sendto(this.dns_fd, packet, len, 0,
 			(struct sockaddr*)&this.nameserv_addrs[this.current_nameserver].addr,
@@ -440,14 +441,14 @@ send_packet(char cmd, const uint8_t *rawdata, const size_t rawdatalen, const int
 /* Base32 encodes data and sends as single DNS query
  * Returns ID of sent query */
 {
-	size_t len = rawdatalen + hmaclen + 6;
+	size_t len = rawdatalen + hmaclen + 4 + 2;
 	uint8_t buf[512], data[len + 4], hmac[16];
 
 	if (rawdata && rawdatalen) {
-		memcpy(data + 8 + hmaclen, rawdata, rawdatalen);
+		memcpy(data + 10 + hmaclen, rawdata, rawdatalen);
 	}
 
-	*(uint32_t *) (data + 4) = htonl(CMC(this.cmc_up));
+	*(uint32_t *) (data + 6) = htonl(CMC(this.cmc_up));
 
 	buf[0] = cmd;
 	buf[1] = this.userid_char;
@@ -714,13 +715,13 @@ raw_validate(uint8_t **packet, size_t len, uint8_t *cmd)
 static int
 handshake_waitdns(uint8_t *buf, size_t *buflen, char cmd, int timeout)
 /* Wait for DNS reply fitting to our latest query and returns it.
-   *buflen is set to length of reply = #bytes used in buf
+   *buflen is set to length of reply data = #bytes used in buf
    Returns 1 on success
-   Returns 0 if fitting reply happens to be useless.
+   Returns 0 on downstream decode error
+   Returns -1 on syscall errors.
    Returns -2 on (at least) DNS error that fits to our latest query,
    error message already printed.
    Returns -3 on timeout (given in seconds).
-   Returns -1 on other errors.
 
    Timeout is restarted when "wrong" (previous/delayed) replies are received,
    so effective timeout may be longer than specified.
@@ -732,8 +733,8 @@ handshake_waitdns(uint8_t *buf, size_t *buflen, char cmd, int timeout)
 	fd_set fds;
 	struct timeval tv;
 	char qcmd;
-	uint8_t pkt[64*1024];
-	size_t pktlen = sizeof(pkt);
+	uint8_t pkt[64*1024], ansdata[4096];
+	size_t pktlen;
 
 	cmd = toupper(cmd);
 
@@ -749,6 +750,7 @@ handshake_waitdns(uint8_t *buf, size_t *buflen, char cmd, int timeout)
 		if (r == 0)
 			return -3;	/* select timeout */
 
+		pktlen = sizeof(pkt);
 		if (!read_packet(this.dns_fd, pkt, &pktlen, &m))
 			return -1;	/* read error */
 
@@ -756,7 +758,8 @@ handshake_waitdns(uint8_t *buf, size_t *buflen, char cmd, int timeout)
 			return -1;	/* invalid DNS packet */
 		}
 
-		DEBUG(2, "RX: id %5d len=%" L "u name=", q->id, format_host(q->q[0].name, q->q[0].namelen, 0));
+		DEBUG(2, "RX: id %5d len %" L "u: hostname '%s'", q->id, q->q[0].namelen,
+				format_host(q->q[0].name, q->q[0].namelen, 0));
 
 		/* Non-recursive DNS servers (such as [a-m].root-servers.net)
 		   return no answer, but only additional and authority records.
@@ -766,19 +769,19 @@ handshake_waitdns(uint8_t *buf, size_t *buflen, char cmd, int timeout)
 		 */
 		if (q->rcode == NOERROR && q->ancount == 0) {
 			fprintf(stderr, "Got empty reply. This nameserver may not be resolving recursively, use another.\n");
-			fprintf(stderr, "Try \"iodine [options] %s ns.%s\" first, it might just work.\n",
-				this.topdomain, this.topdomain);
+			char *td = format_host(this.topdomain, HOSTLEN(this.topdomain), 0);
+			fprintf(stderr, "Try \"iodine [options] %s ns.%s\" first, it might just work.\n", td, td);
 			return -2;
 		}
 
-		size_t decbuflen = *buflen;
-		r = dns_decode_data_answer(q, buf, &decbuflen);
+		size_t ansdatalen = sizeof(ansdata);
+		r = dns_decode_data_answer(q, ansdata, &ansdatalen);
 
-		qcmd = toupper(buf[0]);
-		if (r && decbuflen && (q->id != this.lastid || qcmd != cmd)) {
-			DEBUG(1, "Ignoring unfitting reply id %hu starting with '%c'", q->id, buf[0]);
+		qcmd = toupper(q->q[0].name[1]);
+		if (r && ansdatalen && (q->id != this.lastid || qcmd != toupper(cmd))) {
+			DEBUG(1, "Ignoring unfitting reply id %hu starting with '%c'", q->id, qcmd);
 			continue;
-		} else {
+		} else if (q->rcode != NOERROR) {
 			/* If we get an immediate SERVFAIL on the handshake query
 			   we're waiting for, wait a while before sending the next.
 			   SERVFAIL reliably happens during fragsize autoprobe, but
@@ -792,73 +795,14 @@ handshake_waitdns(uint8_t *buf, size_t *buflen, char cmd, int timeout)
 				sleep(1);
 			write_dns_error(q, 1);
 				return -2;
-		}
+		} /* if still here: reply matches our latest query */
 
-		/* if still here: reply matches our latest query */\
-		*buflen = decbuflen;
-		return 1;
+		return downstream_decode(buf, buflen, ansdata, ansdatalen,
+				this.connected ? this.hmac_key : NULL);
 	}
 
 	/* not reached */
 	return -1;
-}
-
-static int
-downstream_decode(uint8_t *out, size_t *outlen, uint8_t *encdata, size_t encdatalen)
-/* validate downstream header + HMAC, decode data
- * note: exact reverse of downstream_encode in server.c
- * returns 1 on success, <1 with error code */
-{
-	if (encdatalen < 1)
-		return 0;
-
-	size_t hmaclen;
-	uint32_t len;
-	uint8_t flags = b32_8to5(encdata[0]);
-
-	hmaclen = flags & DH_HMAC32 ? 4 : 12;
-
-	if (flags & DH_ERROR) {
-		DEBUG(1, "got DH_ERROR from server! code=%x", flags & 7);
-		/* always 96-bit HMAC when error flag is set */
-		hmaclen = 12;
-		if (flags & DH_HMAC32) {
-			DEBUG(2, "server says 32-bit HMAC with error flag set!");
-		}
-	}
-
-	if (encdatalen < 5 + hmaclen) {
-		/* packet length must at least match flags */
-		return E_BADLEN;
-	}
-
-	/* deconstruct downstream data header
-	 * 4 bytes CMC (network byte order) (random for pre-login responses)
-	 * 4 or 12 bytes HMAC (note: HMAC field is 32-bits random for all pre-login responses)
-	 * for HMAC calculation (in hmacbuf): length + flags + CMC + hmac + data */
-	len = encdatalen;
-	uint8_t hmac[16], hmac_pkt[16], hmacbuf[len + 4], *p;
-	p = hmacbuf;
-
-	putlong(&p, len); /* 4 bytes length */
-	putdata(&p, encdata, encdatalen);
-
-	memcpy(hmac_pkt, hmacbuf + 9, hmaclen);
-	memset(hmacbuf + 9, 0, hmaclen);
-	hmac_md5(hmac, this.hmac_key, 16, hmacbuf, len + 4);
-
-	if (memcmp(hmac, hmac_pkt, hmaclen) != 0) {
-		DEBUG(3, "RX: bad HMAC pkt=%s, actual=%s",
-				tohexstr(hmac_pkt, hmaclen, 0), tohexstr(hmac, hmaclen, 1));
-		return E_BADAUTH;
-	}
-
-	if (!(flags & DH_ERROR)) {
-		*outlen = unpack_data(out, *outlen, encdata, encdatalen, flags & 7);
-		return 1;
-	} else {
-		return -(flags & 7);
-	}
 }
 
 static int
@@ -873,18 +817,14 @@ parse_data(uint8_t *data, size_t len, fragment *f, int *immediate, int *ping)
 	f->end = data[2] & 1;
 	f->start = (data[2] >> 1) & 1;
 	f->compressed = (data[2] >> 2) & 1;
-	f->ack_other = (data[2] >> 3) & 1 ? data[1] : -1;
 	if (ping) *ping = (data[2] >> 4) & 1;
-	error = (data[2] >> 6) & 1;
-
-	if (immediate)
-		*immediate = (data[2] >> 5) & 1;
+	if (immediate) *immediate = (data[2] >> 5) & 1;
 
 	if (ping && *ping) { /* Handle ping stuff */
 		static unsigned dn_start_seq, up_start_seq, dn_wsize, up_wsize;
 
 		headerlen = DOWNSTREAM_PING_HDR;
-		if (len < headerlen) return -1; /* invalid packet - continue */
+		if (len < headerlen) return 0; /* invalid packet - continue */
 
 		/* Parse data/ping header */
 		dn_wsize = data[3];
@@ -897,7 +837,7 @@ parse_data(uint8_t *data, size_t len, fragment *f, int *immediate, int *ping)
 	f->len = len - headerlen;
 	if (f->len > 0)
 		memcpy(f->data, data + headerlen, MIN(f->len, this.inbuf->maxfraglen));
-	return error;
+	return 1;
 }
 
 static ssize_t
@@ -986,7 +926,7 @@ tunnel_tun()
 	return read;
 }
 
-static int
+static void
 tunnel_dns()
 {
 	struct dns_packet *q;
@@ -994,7 +934,7 @@ tunnel_dns()
 	size_t datalen, buflen;
 	uint8_t buf[64*1024], cbuf[64*1024], *data, compressed;
 	fragment f;
-	int ping, immediate, error;
+	int ping, immediate;
 	char cmd;
 
 	memset(&q, 0, sizeof(q));
@@ -1003,28 +943,37 @@ tunnel_dns()
 
 	buflen = sizeof(buf);
 	if (!read_packet(this.dns_fd, buf, &buflen, &m)) {
-		return 0;
+		return;
 	}
 
 	if (this.conn == CONN_DNS_NULL) {
 		if ((q = dns_decode(buf, buflen)) == NULL)
-			return 0;
+			return;
 
-		DEBUG(2, "RX: id %5d len=%" L "u name=", q->id, format_host(q->q[0].name, q->q[0].namelen, 0));
+		DEBUG(2, "RX: id %5d len=%" L "u name='%s'", q->id, format_host(q->q[0].name, q->q[0].namelen, 0));
 
 		datalen = sizeof(buf);
 		if (!dns_decode_data_answer(q, cbuf, &datalen)) /* cbuf contains data */
 			datalen = 0;
 		buflen = sizeof(buf);
-		if (!downstream_decode(buf, &buflen, cbuf, datalen))
-			buflen = 0;
+		if (!downstream_decode(buf, &buflen, cbuf, datalen, this.hmac_key) &&
+			(downstream_decode_err & DDERR_IS_ANS) && (downstream_decode_err & 7) == E_BADAUTH) {
+			this.num_badauth++;
+			if (this.num_badauth % 5 == 1) {
+				fprintf(stderr, "BADAUTH (%" L "d): Server rejected client authentication, or server "
+					"kicked us due to timeout. Will exit if no downstream data is received in 60 seconds.\n", this.num_badauth);
+			}
+			return;	/* nothing done */
+		}
+		memcpy(&q->m, &m, sizeof(m));
 		cmd = tolower(q->q[0].name[1]);
 
+		got_response(q->id, immediate, 0); /* Mark query as received */
 	} else { /* CONN_RAW_UDP */
 		uint8_t *data = buf, cmd;
 
 		if (!raw_validate(&data, buflen, &cmd)) {
-			return 0;
+			return;
 		}
 
 		if (cmd == RAW_HDR_CMD_DATA || cmd == RAW_HDR_CMD_PING)
@@ -1032,7 +981,7 @@ tunnel_dns()
 
 		/* should be data packet */
 		if (RAW_HDR_GET_CMD(buf) != RAW_HDR_CMD_DATA)
-			return 0;
+			return;
 
 		buflen -= RAW_HDR_LEN;
 		datalen = sizeof(buf);
@@ -1040,8 +989,7 @@ tunnel_dns()
 			write_tun(this.tun_fd, cbuf, datalen);
 		}
 
-		/* all done */
-		return 1;
+		return; /* all done */
 	}
 
 	/* Don't process anything that isn't data for us; usually error
@@ -1052,7 +1000,8 @@ tunnel_dns()
 	if (cmd != 'p' && cmd != this.userid_char) {
 		this.send_ping_soon = 700;
 		got_response(q->id, 0, 0);
-		return -1;	/* nothing done */
+		dns_packet_destroy(q);
+		return;	/* nothing done */
 	}
 
 	if (buflen < DOWNSTREAM_DATA_HDR) {
@@ -1067,21 +1016,12 @@ tunnel_dns()
 
 		this.send_ping_soon = 900;
 
-		/* Mark query as received */
-		got_response(q->id, 0, 1);
-		return -1;	/* nothing done */
+		dns_packet_destroy(q);
+		return;	/* nothing done */
 	}
 
 	this.send_query_recvcnt++;  /* unlikely we will ever overflow (2^64 queries is a LOT) */
 
-	if (buflen == 5 && !strncmp("BADIP", (char *)cbuf, 5)) {
-		this.num_badip++;
-		if (this.num_badip % 5 == 1) {
-			fprintf(stderr, "BADIP (%" L "d): Server rejected sender IP address (maybe iodined -c will help), or server "
-					"kicked us due to timeout. Will exit if no downstream data is received in 60 seconds.\n", this.num_badip);
-		}
-		return -1;	/* nothing done */
-	}
 
 	/* Okay, we have a recent downstream packet */
 	this.lastdownstreamtime = time(NULL);
@@ -1090,10 +1030,9 @@ tunnel_dns()
 
 	/* Decode the downstream data header and fragment-ify ready for processing */
 	f.data = buf;
-	error = parse_data(cbuf, read, &f, &immediate, &ping);
+	if (!parse_data(cbuf, read, &f, &immediate, &ping)) {
 
-	/* Mark query as received */
-	got_response(q->id, immediate, 0);
+	}
 
 	if ((debug >= 3 && ping) || (debug >= 2 && !ping))
 		fprintf(stderr, " RX %s; frag ID %3u, ACK %3d, compression %d, datalen %" L "u, s%d e%d\n",
@@ -1103,14 +1042,6 @@ tunnel_dns()
 	if (f.ack_other >= 0) {
 		window_ack(this.outbuf, f.ack_other);
 		window_tick(this.outbuf);
-	}
-
-	/* respond to TCP forwarding errors by shutting down */
-	if (error && this.use_remote_forward) {
-		f.data[f.len] = 0;
-		warnx("server: TCP forwarding error: %s", f.data);
-		this.running = 0;
-		return -1;
 	}
 
 	/* In lazy mode, we shouldn't get immediate replies to our most-recent
@@ -1125,7 +1056,7 @@ tunnel_dns()
 			this.send_ping_soon = 100;
 		else
 			this.send_ping_soon = 700;
-		return -1;
+		return;
 	}
 
 	/* Get next ACK if nothing already pending: if we get a new ack
@@ -1174,8 +1105,6 @@ tunnel_dns()
 			}
 		}
 	}
-
-	return read;
 }
 
 int
@@ -1197,7 +1126,7 @@ client_tunnel()
 	last_stats = time(NULL);
 
 	/* reset connection statistics */
-	this.num_badip = 0;
+	this.num_badauth = 0;
 	this.num_servfail = 0;
 	this.num_timeouts = 0;
 	this.send_query_recvcnt = 0;
@@ -1283,8 +1212,8 @@ client_tunnel()
 				fprintf(stderr, "  last %3d secs: %7" L "u" " (%4" L "u/s),   replies: %7" L "u" " (%4" L "u/s)\n",
 						this.stats, this.num_sent - sent_since_report, (this.num_sent - sent_since_report) / this.stats,
 						this.num_recv - recv_since_report, (this.num_recv - recv_since_report) / this.stats);
-				fprintf(stderr, "  num IP rejected: %4" L "u,   untracked: %4" L "u,   lazy mode: %1d\n",
-						this.num_badip, this.num_untracked, this.lazymode);
+				fprintf(stderr, "  num auth rejected: %4" L "u,   untracked: %4" L "u,   lazy mode: %1d\n",
+						this.num_badauth, this.num_untracked, this.lazymode);
 				fprintf(stderr, " Min send: %5" L "d ms, Avg RTT: %5" L "d ms  Timeout server: %4" L "d ms\n",
 						this.min_send_interval_ms, this.rtt_total_ms / this.num_immediate, this.server_timeout_ms);
 				fprintf(stderr, " Queries immediate: %5" L "u, timed out: %4" L "u    target: %4" L "d ms\n",
@@ -1428,16 +1357,15 @@ static void
 send_version(uint32_t version)
 {
 	uint8_t data[8], buf[512];
+	size_t buflen = sizeof(buf) - 1, encbuflen;
 
 	*(uint32_t *) data = htonl(version);
 	*(uint32_t *) (data + 4) = htonl(CMC(this.cmc_up)); /* CMC */
 
 	buf[0] = 'v';
+	encbuflen = b32->encode(buf + 1, &buflen, data, sizeof(data));
 
-	build_hostname(buf, sizeof(buf), data, sizeof(data),
-				   this.topdomain, b32, this.hostname_maxlen, 1);
-
-	send_query(buf, strlen(buf));
+	send_query(buf, encbuflen + 1);
 }
 
 static void
@@ -1447,9 +1375,8 @@ send_login(uint8_t *login, uint8_t *cc)
 {
 	uint8_t data[32];
 
-	DEBUG(6, "TX login: hash=0x%016llx%016llx, cc=0x%016llx%016llx, cmc=%u",
-		  *(uint64_t*)(login), *(uint64_t*)(login+8), *(uint64_t*)cc,
-		  *(uint64_t*)(cc+8), this.cmc_up);
+	DEBUG(6, "TX login: hash=0x%s, cc=0x%s, cmc=%u",
+			tohexstr(login, 16, 0), tohexstr(cc, 16, 1), this.cmc_up);
 
 	memcpy(data, login, 16);
 	memcpy(data + 16, cc, 16);
@@ -1566,57 +1493,50 @@ send_server_options(int lazy, int compression, char denc)
 static int
 handshake_version(uint8_t *sc)
 {
-	char hex[] = "0123456789abcdef";
-	char in[4096];
+	uint8_t hex[] = "0123456789abcdef", in[4096];
 	uint32_t payload;
-	int i;
-	int read;
+	size_t len;
+	int ret;
 
-	for (i = 0; this.running && i < 5; i++) {
+	for (int i = 0; this.running && i < 5; i++) {
 
 		send_version(PROTOCOL_VERSION);
 
-		read = handshake_waitdns(in, sizeof(in), 'V', i+1);
+		len = sizeof(in);
+		if ((ret = handshake_waitdns(in, &len, 'V', i + 1)) != 1 || len < 9) {
+			fprintf(stderr, "Retrying version check...\n");
+			continue;
+		}
 
-		if (read >= 9) {
-			payload = ntohl(*(uint32_t *) (in + 4));
-
-			if (strncmp("VACK", (char *)in, 4) == 0) {
-				if (read != 28) {
-					fprintf(stderr, "Bad version check reply from server, trying again...");
-					continue;
-				}
-				/* Payload is new userid, and there will also be 16 bytes
-				 * server challenge. */
-				for (size_t p = 0; p < 16; p++) {
-					sc[p] = *(in + 8 + p);
-				}
-				/* Set CMC to starting value given by server. */
-				this.cmc_down = ntohl(*(uint32_t *) (in + 24));
-
-				this.userid = payload;
-				this.userid_char = hex[this.userid & 15];
-
-				DEBUG(2, "Login: sc=0x%016llx%016llx, cmc_up=%u, cmc_dn=%u",
-						*(uint64_t*)sc, *(uint64_t*)(sc+8), this.cmc_up, this.cmc_down);
-
-				fprintf(stderr, "Version ok, both using protocol v 0x%08x. You are user #%d\n",
-					PROTOCOL_VERSION, this.userid);
-				return 0;
-			} else if (strncmp("VNAK", (char *)in, 4) == 0) {
-				/* Payload is server version */
-				warnx("You use protocol v 0x%08x, server uses v 0x%08x. Giving up",
-						PROTOCOL_VERSION, payload);
-				return 1;
-			} else if (strncmp("VFUL", (char *)in, 4) == 0) {
-				/* Payload is max number of users on server */
-				warnx("Server full, all %d slots are taken. Try again later", payload);
-				return 1;
+		payload = ntohl(*(uint32_t *) (in + 4));
+		if (memcmp("VACK", in, 4) == 0) {
+			if (len != 28) {
+				fprintf(stderr, "Bad version check reply from server, trying again...");
+				continue;
 			}
-		} else if (read > 0)
-			warnx("did not receive proper login challenge");
+			/* Payload is new userid, and there will also be 16 bytes
+			 * server challenge. */
+			memcpy(sc, in + 8, 16);
+			/* Set CMC to starting value given by server. */
+			this.cmc_down = ntohl(*(uint32_t *) (in + 24));
+			this.userid = payload;
+			this.userid_char = hex[this.userid & 15];
 
-		fprintf(stderr, "Retrying version check...\n");
+			DEBUG(2, "Login: sc=%s, cmc_up=%u, cmc_dn=%u", tohexstr(sc, 16, 0), this.cmc_up, this.cmc_down);
+
+			fprintf(stderr, "Version ok, both using protocol v 0x%08x. You are user #%d\n",
+				PROTOCOL_VERSION, this.userid);
+			return 0;
+		} else if (memcmp("VNAK", in, 4) == 0) {
+			/* Payload is server version */
+			warnx("You use protocol v 0x%08x, server uses v 0x%08x. Giving up",
+					PROTOCOL_VERSION, payload);
+			return 1;
+		} else if (memcmp("VFUL", in, 4) == 0) {
+			/* Payload is max number of users on server */
+			warnx("Server full, all %d slots are taken. Try again later", payload);
+			return 1;
+		}
 	}
 	warnx("couldn't connect to server (maybe other -T options will work)");
 	return 1;
@@ -1625,67 +1545,45 @@ handshake_version(uint8_t *sc)
 static int
 handshake_login(uint8_t *sc)
 {
-	uint8_t in[40], clogin[16], slogin[16], cc[16], netmask;
-	char server[16], client[16];
-	uint16_t mtu;
-	int read, numwaiting = 0;
-	struct in_addr ip;
+	uint8_t in[40], clogin[16], slogin[16], cc[16];
+	size_t len;
+	int ret;
 
-	// generate client-to-server login challenge and hashes
+	/* generate client-to-server login challenge and hashes */
 	get_rand_bytes(cc, sizeof(cc));
 	login_calculate(clogin, this.passwordmd5, sc);
 	login_calculate(slogin, this.passwordmd5, cc);
 
 	for (int i = 0; this.running && i < 5; i++) {
-
 		send_login(clogin, cc);
 
-		// TODO handle LNAK/BADAUTH error code somewhere.
-		//				fprintf(stderr, "Bad password\n");
-		// 				return 1;
-		read = handshake_waitdns(in, sizeof(in), 'L', i + 1);
-
-		if (read == 31) {
-			/* confirm server identity by checking the hash */
-			if (memcmp(in + 11, slogin, 16) != 0) {
-				DEBUG(1, "hash mismatch! server: 0x%016llx%016llx, actual: 0x%016llx%016llx",
-						*(uint64_t*)(in+11), *(uint64_t*)(in+19),
-						*(uint64_t*)slogin, *(uint64_t*)(slogin+8));
-				fprintf(stderr, "Server authentication failed: hash mismatch! Trying again...\n");
-				continue;
-			}
-
-			// TODO deal with only UDP forwarding (possibly built without TUN support)
-			ip.s_addr = *(uint32_t *) in;
-			strncpy(server, inet_ntoa(ip), sizeof(server));
-			ip.s_addr = *(uint32_t *) (in + 4);
-			strncpy(client, inet_ntoa(ip), sizeof(client));
-			mtu = ntohs(*(uint16_t *) (in + 8));
-			netmask = in[10];
-
-			/* Login is now completed, now we can generate HMAC key */
-			hmac_key_calculate(this.hmac_key, sc, 16, cc, 16, this.passwordmd5);
-			memset(sc, 0, 16);
-			memset(cc, 0, 16);
-
-			if (tun_setip(client, server, netmask) == 0 && tun_setmtu(mtu) == 0) {
-				fprintf(stderr, "Server tunnel IP/netmask is %s/%hhu, our IP is %s\n",
-						server, netmask, client);
-				return 0;
-			} else {
-				errx(4, "Failed to set IP and MTU");
-			}
-
-		} else {
-			DEBUG(1, "Bad login reply from server: wrong len (%d != 31)", read);
+		len = sizeof(in);
+		ret = handshake_waitdns(in, &len, 'L', i + 1);
+		if (ret == 0 && downstream_decode_err == (DDERR_IS_ANS | DH_ERR(BADLOGIN))) {
+			fprintf(stderr, "Bad password\n");
+			return 1;
+		} else if (ret != 1 || len != 16) {
+			DEBUG(1, "Bad login reply from server: len (%d != 16)", len);
+			fprintf(stderr, "Retrying login...\n");
+			continue;
 		}
 
-		fprintf(stderr, "Retrying login...\n");
+		/* confirm server identity by checking the hash */
+		if (memcmp(in, slogin, 16) != 0) {
+			DEBUG(1, "hash mismatch! server: 0x%s, actual: 0x%s",
+					tohexstr(in, 16, 0), tohexstr(slogin, 16, 1));
+			fprintf(stderr, "Server authentication failed: hash mismatch! Trying again...\n");
+			continue;
+		}
+		/* Login is now completed, now we can generate HMAC key */
+		hmac_key_calculate(this.hmac_key, sc, 16, cc, 16, this.passwordmd5);
+		this.connected = 1;
+		memset(sc, 0, 16);
+		memset(cc, 0, 16);
+		return 0;
+
 	}
-	if (numwaiting != 0)
-		warnx("Remote TCP forward connection timed out after 5 tries.");
-	else
-		warnx("couldn't login to server");
+	warnx("couldn't login to server");
 
 	return 1;
 }
@@ -1695,24 +1593,26 @@ handshake_raw_udp()
 {
 	struct timeval tv;
 	uint8_t in[4096];
+	size_t len;
 	fd_set fds;
-	int r;
-	int len;
-	int got_addr;
+	int ret;
+	int got_addr = 0;
 	// TODO fix raw UDP login
-	int seed = 0;
 
 	memset(&this.raw_serv, 0, sizeof(this.raw_serv));
 	got_addr = 0;
 
 	fprintf(stderr, "Testing raw UDP data to the server (skip with -r)");
 	for (int i = 0; this.running && i < 3; i++) {
-
 		send_ip_request();
+		fprintf(stderr, ".");
+		fflush(stderr);
+		len = sizeof(in);
+		if ((ret = handshake_waitdns(in, &len, 'I', i + 1)) != 1) {
+			continue;
+		}
 
-		len = handshake_waitdns(in, sizeof(in), 'I', i+1);
-
-		if (len == 5 && in[0] == 'I') {
+		if (len == 5 && in[0] == 4) {
 			/* Received IPv4 address */
 			struct sockaddr_in *raw4_serv = (struct sockaddr_in *) &this.raw_serv;
 			raw4_serv->sin_family = AF_INET;
@@ -1722,7 +1622,7 @@ handshake_raw_udp()
 			got_addr = 1;
 			break;
 		}
-		if (len == 17 && in[0] == 'I') {
+		if (len == 17 && in[0] == 16) {
 			/* Received IPv6 address */
 			struct sockaddr_in6 *raw6_serv = (struct sockaddr_in6 *) &this.raw_serv;
 			raw6_serv->sin6_family = AF_INET6;
@@ -1733,8 +1633,6 @@ handshake_raw_udp()
 			break;
 		}
 
-		fprintf(stderr, ".");
-		fflush(stderr);
 	}
 	fprintf(stderr, "\n");
 	if (!this.running)
@@ -1754,17 +1652,17 @@ handshake_raw_udp()
 		tv.tv_sec = i + 1;
 		tv.tv_usec = 0;
 
-		send_raw_udp_login(seed);
+		send_raw_udp_login();
 
 		FD_ZERO(&fds);
 		FD_SET(this.dns_fd, &fds);
 
-		r = select(this.dns_fd + 1, &fds, NULL, NULL, &tv);
+		ret = select(this.dns_fd + 1, &fds, NULL, NULL, &tv);
 
-		if(r > 0) {
+		if(ret > 0) {
 			/* recv() needed for windows, dont change to read() */
 			len = recv(this.dns_fd, in, sizeof(in), 0);
-			if (len >= (16 + RAW_HDR_LEN)) {
+			if (ret >= (16 + RAW_HDR_LEN)) {
 				char hash[16];
 				// login_calculate(hash, 16, this.passwordmd5, seed - 1);
 				if (memcmp(in, raw_header, RAW_HDR_IDENT_LEN) == 0
@@ -2342,6 +2240,24 @@ opt_revert:
 
 	fprintf(stderr, "Falling back to previous configuration: downstream codec %s, %s mode, compression %s.\n",
 			this.dataenc->name, lazy_status, comp_status);
+
+
+	// TODO deal with only UDP forwarding (possibly built without TUN support)
+//	ip.s_addr = *(uint32_t *) in;
+//	strncpy(server, inet_ntoa(ip), sizeof(server));
+//	ip.s_addr = *(uint32_t *) (in + 4);
+//	strncpy(client, inet_ntoa(ip), sizeof(client));
+//	mtu = ntohs(*(uint16_t *) (in + 8));
+//	netmask = in[10];
+//
+//	if (tun_setip(client, server, netmask) == 0 && tun_setmtu(mtu) == 0) {
+//		fprintf(stderr, "Server tunnel IP/netmask is %s/%hhu, our IP is %s\n",
+//				server, netmask, client);
+//		return 0;
+//	} else {
+//		errx(4, "Failed to set IP and MTU");
+//	}
+
 }
 
 static int
@@ -2568,20 +2484,18 @@ int
 client_handshake()
 {
 	uint8_t server_chall[16];
-	int upcodec;
+	int upcodec, autoqtype = 0;
 	int r;
 
 	dnsc_use_edns0 = 0;
 
 	/* qtype message printed in handshake function */
 	if (this.do_qtype == T_UNSET) {
-		r = handshake_qtype_autodetect();
-		if (r) {
-			return r;
-		}
+		autoqtype = 1;
+		this.do_qtype = T_A; /* use A queries for login process */
+	} else {
+		fprintf(stderr, "Using DNS type %s queries\n", client_get_qtype());
 	}
-
-	fprintf(stderr, "Using DNS type %s queries\n", client_get_qtype());
 
 	this.cmc_up = rand();
 
@@ -2593,84 +2507,91 @@ client_handshake()
 		return r;
 	}
 
+	/* test raw UDP mode */
 	if (this.raw_mode && handshake_raw_udp()) {
 		this.conn = CONN_RAW_UDP;
 		this.max_timeout_ms = 10000;
 		this.compression_down = 1;
 		this.compression_up = 1;
-	} else {
-		if (this.raw_mode == 0) {
-			fprintf(stderr, "Skipping raw mode\n");
-		}
-
-		dnsc_use_edns0 = 1;
-		if (handshake_edns0_check() && this.running) {
-			fprintf(stderr, "Using EDNS0 extension\n");
-		} else if (!this.running) {
-			return -1;
-		} else {
-			fprintf(stderr, "DNS relay does not support EDNS0 extension\n");
-			dnsc_use_edns0 = 0;
-		}
-
-		upcodec = handshake_upenc_autodetect();
-		if (!this.running)
-			return -1;
-
-		if (upcodec == 1) { /* Base64 */
-			handshake_switch_codec(6);
-		} else if (upcodec == 2) { /* Base64u */
-			handshake_switch_codec(26);
-		} else if (upcodec == 3) { /* Base128 */
-			handshake_switch_codec(7);
-		}
-		if (!this.running)
-			return -1;
-
-		if (this.downenc == ' ') {
-			this.downenc = handshake_downenc_autodetect();
-		}
-		if (!this.running)
-			return -1;
-
-		/* Set options for compression, this.lazymode and downstream codec */
-		handshake_switch_options(this.lazymode, this.compression_down, this.downenc);
-		if (!this.running)
-			return -1;
-
-		if (this.autodetect_frag_size) {
-			this.maxfragsize_down = handshake_autoprobe_fragsize();
-			if (this.maxfragsize_down > MAX_FRAGSIZE) {
-				/* This is very unlikely except perhaps over LAN */
-				fprintf(stderr, "Can transfer fragsize of %d, however iodine has been compiled with MAX_FRAGSIZE = %d."
-					" To fully utilize this connection, please recompile iodine/iodined.\n", this.maxfragsize_down, MAX_FRAGSIZE);
-				this.maxfragsize_down = MAX_FRAGSIZE;
-			}
-			if (!this.maxfragsize_down) {
-				return 1;
-			}
-		}
-
-		handshake_set_fragsize(this.maxfragsize_down);
-		if (!this.running)
-			return -1;
-
-		/* init windowing protocol */
-		this.outbuf = window_buffer_init(64, (0 == this.windowsize_up ? 1 : this.windowsize_up), this.maxfragsize_up, WINDOW_SENDING);
-		this.outbuf->timeout = ms_to_timeval(this.downstream_timeout_ms);
-		/* Incoming buffer max fragsize doesn't matter */
-		this.inbuf = window_buffer_init(64, this.windowsize_down, MAX_FRAGSIZE, WINDOW_RECVING);
-
-		/* init query tracking */
-		this.num_untracked = 0;
-		this.num_pending = 0;
-		this.pending_queries = calloc(PENDING_QUERIES_LENGTH, sizeof(struct query_tuple));
-		for (int i = 0; i < PENDING_QUERIES_LENGTH; i++)
-			this.pending_queries[i].id = -1;
-
-		/* set server window/timeout parameters and calculate RTT */
-		handshake_set_timeout();
+		return 0;
 	}
+
+	/* using CONN_DNS_NULL */
+	if (this.raw_mode == 0) {
+		fprintf(stderr, "Skipping raw mode\n");
+	}
+
+	dnsc_use_edns0 = 1;
+	if (handshake_edns0_check() && this.running) {
+		fprintf(stderr, "Using EDNS0 extension\n");
+	} else if (!this.running) {
+		return -1;
+	} else {
+		fprintf(stderr, "DNS relay does not support EDNS0 extension\n");
+		dnsc_use_edns0 = 0;
+	}
+
+	if ((r = handshake_qtype_autodetect()) != 0) {
+		return r;
+	}
+
+	upcodec = handshake_upenc_autodetect();
+	if (!this.running)
+		return -1;
+
+	if (upcodec == 1) { /* Base64 */
+		handshake_switch_codec(6);
+	} else if (upcodec == 2) { /* Base64u */
+		handshake_switch_codec(26);
+	} else if (upcodec == 3) { /* Base128 */
+		handshake_switch_codec(7);
+	}
+	if (!this.running)
+		return -1;
+
+	if (this.downenc == ' ') {
+		this.downenc = handshake_downenc_autodetect();
+	}
+	if (!this.running)
+		return -1;
+
+	/* Set options for compression, this.lazymode and downstream codec */
+	handshake_switch_options(this.lazymode, this.compression_down, this.downenc);
+	if (!this.running)
+		return -1;
+
+	if (this.autodetect_frag_size) {
+		this.maxfragsize_down = handshake_autoprobe_fragsize();
+		if (this.maxfragsize_down > MAX_FRAGSIZE) {
+			/* This is very unlikely except perhaps over LAN */
+			fprintf(stderr, "Can transfer fragsize of %d, however iodine has been compiled with MAX_FRAGSIZE = %d."
+				" To fully utilize this connection, please recompile iodine/iodined.\n", this.maxfragsize_down, MAX_FRAGSIZE);
+			this.maxfragsize_down = MAX_FRAGSIZE;
+		}
+		if (!this.maxfragsize_down) {
+			return 1;
+		}
+	}
+
+	handshake_set_fragsize(this.maxfragsize_down);
+	if (!this.running)
+		return -1;
+
+	/* init windowing protocol */
+	this.outbuf = window_buffer_init(64, (0 == this.windowsize_up ? 1 : this.windowsize_up), this.maxfragsize_up, WINDOW_SENDING);
+	this.outbuf->timeout = ms_to_timeval(this.downstream_timeout_ms);
+	/* Incoming buffer max fragsize doesn't matter */
+	this.inbuf = window_buffer_init(64, this.windowsize_down, MAX_FRAGSIZE, WINDOW_RECVING);
+
+	/* init query tracking */
+	this.num_untracked = 0;
+	this.num_pending = 0;
+	this.pending_queries = calloc(PENDING_QUERIES_LENGTH, sizeof(struct query_tuple));
+	for (int i = 0; i < PENDING_QUERIES_LENGTH; i++)
+		this.pending_queries[i].id = -1;
+
+	/* set server window/timeout parameters and calculate RTT */
+	handshake_set_timeout();
 
 	return 0;
 }

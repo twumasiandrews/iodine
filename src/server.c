@@ -386,7 +386,7 @@ forward_query(int bind_fd, struct dns_packet *q, uint8_t *pkt, size_t pktlen)
 }
 
 static void
-send_version_response(int fd, version_ack_t ack, uint32_t payload, int userid, struct query *q)
+send_version_response(int fd, version_ack_t ack, uint32_t payload, int userid, struct dns_packet *q)
 {
 	uint8_t out[28], *p = out, flags = C_BASE32;
 	size_t len = sizeof(out);
@@ -702,6 +702,7 @@ tunnel_dns(int dns_fd)
 		   by our proper response to any NS request */
 		if (encdatalen == 2 && q->q[0].type == T_A && memcmp(encdata, "ns", 2) == 0) {
 			handle_a_request(dns_fd, q, 0);
+			dns_packet_destroy(q);
 			return;
 		}
 
@@ -709,6 +710,7 @@ tunnel_dns(int dns_fd)
 		   poking around */
 		if (encdatalen == 3 && q->q[0].type == T_A && memcmp(encdata, "www", 3) == 0) {
 			handle_a_request(dns_fd, q, 1);
+			dns_packet_destroy(q);
 			return;
 		}
 
@@ -740,6 +742,7 @@ tunnel_dns(int dns_fd)
 			forward_query(server.bind_fd, q, pkt, pktlen);
 		}
 	}
+	dns_packet_destroy(q);
 }
 
 int
@@ -1013,47 +1016,6 @@ raw_decode(uint8_t *packet, size_t len, struct pkt_metadata *m, int dns_fd)
 	return 1;
 }
 
-static int
-downstream_encode(uint8_t *out, size_t *outlen, uint8_t *data,
-		size_t datalen, int userid, uint8_t flags)
-/* Adds downstream header (flags+CMC+HMAC) to given data and encode
- * returns #bytes that were encoded */
-{
-	size_t hmaclen;
-	uint32_t len;
-
-	if (flags & DH_ERROR) {
-		if (flags & DH_HMAC32) {
-			/* always 96-bit HMAC when error flag is set */
-			flags ^= DH_HMAC32;
-		}
-	}
-	hmaclen = flags & DH_HMAC32 ? 4 : 12;
-	if (*outlen < 5 + hmaclen + datalen) {
-		return 0;
-	}
-
-	/* construct downstream data header
-	 * 4 bytes CMC (network byte order) (random for pre-login responses)
-	 * 4 or 12 bytes HMAC (note: HMAC field is 32-bits random for all pre-login responses)
-	 * for HMAC calculation (in hmacbuf): length + flags + CMC + hmac + data */
-	len = 4 + 1 + 4 + hmaclen + datalen;
-	uint8_t hmac[16], hmacbuf[len];
-
-	*(uint32_t *) hmacbuf = htonl(len);
-	out[0] = hmacbuf[4] = b32_5to8(flags);
-	*(uint32_t *) (hmacbuf + 5) = htonl(CMC(users[userid].cmc_down));
-	memcpy(hmacbuf + 9 + hmaclen, data, datalen);
-
-	memset(hmacbuf + 9, 0, hmaclen);
-	hmac_md5(hmac, users[userid].hmac_key, 16, hmacbuf, len);
-	memcpy(hmacbuf + 9, hmac, hmaclen);
-
-	/* now encode data from hmacbuf (not including flags and length, +0 terminator) */
-	*outlen = encode_data(out + 1, *outlen - 2, hmacbuf + 5, len - 5, flags & 7);
-	return 1;
-}
-
 static void
 write_dns(int fd, struct dns_packet *q, int userid, uint8_t *data, size_t datalen, uint8_t flags)
 {
@@ -1087,7 +1049,12 @@ write_dns(int fd, struct dns_packet *q, int userid, uint8_t *data, size_t datale
 		len += encode_data(datap, sizeof(tmpbuf) - 1, data, datalen, codec);
 	} else {
 		len = sizeof(tmpbuf);
-		downstream_encode(tmpbuf, &len, data, datalen, userid, flags);
+		if (userid < 0) { /* invalid userid: preauthenticated response */
+			downstream_encode(tmpbuf, &len, data, datalen, NULL, flags | DH_HMAC32, rand());
+		} else {
+			downstream_encode(tmpbuf, &len, data, datalen, users[userid].hmac_key,
+				flags, CMC(users[userid].cmc_down));
+		}
 	}
 
 	struct dns_packet *ans;
@@ -1191,7 +1158,7 @@ handle_dns_version(int dns_fd, struct dns_packet *q, uint8_t *encdata, size_t en
 
 	DEBUG(1, "User %d connected with correct version from %s.",
 				userid, format_addr(&q->m.from, q->m.fromlen));
-	DEBUG(3, "User %d: sc=0x%016llx%016llx", userid, tohexstr(u->server_chall, 16, 0));
+	DEBUG(3, "User %d: sc=0x%s", userid, tohexstr(u->server_chall, 16, 0));
 }
 
 static void
@@ -1565,22 +1532,22 @@ handle_dns_data(int dns_fd, struct query *q, uint8_t *unpacked, size_t len, int 
 }
 
 static void
-handle_dns_login(int dns_fd, struct query *q, uint8_t *unpacked,
+handle_dns_login(int dns_fd, struct dns_packet *q, uint8_t *unpacked,
 		size_t len, int userid, uint32_t cmc)
 {
-	uint8_t flags, logindata[16], cc[16], out[27];
+	uint8_t flags, logindata[16], cc[16], out[16];
 	char fromaddr[100];
 	struct in_addr tempip;
 
-	CHECK_LEN(len, 36);
+	CHECK_LEN(len, 32);
 
-	strncpy(fromaddr, format_addr(&q->from, q->fromlen), 100);
+	strncpy(fromaddr, format_addr(&q->m.from, q->m.fromlen), 100);
 
-	if (!is_valid_user(userid)) {
+	if (!is_valid_user(userid)) { /* TODO check if user already logged in */
 		write_dns(dns_fd, q, userid, NULL, 0, DH_ERR(BADAUTH));
 		syslog(LOG_WARNING, "rejected login request from user #%d from %s",
 			userid, fromaddr);
-		DEBUG(1, "Rejected login request from user %d (%s): BADUSER", userid, fromaddr);
+		DEBUG(1, "Rejected login request from user %d (%s): bad user", userid, fromaddr);
 		return;
 	}
 
@@ -1589,9 +1556,8 @@ handle_dns_login(int dns_fd, struct query *q, uint8_t *unpacked,
 	login_calculate(logindata, server.passwordmd5, u->server_chall);
 	memcpy(cc, unpacked + 16, 16);
 
-	DEBUG(2, "RX login U%d (%s): hash=0x%016llx%016llx, cc=0x%016llx%016llx, cmc=%u",
-			  userid, fromaddr, *(uint64_t*)(unpacked), *(uint64_t*)(unpacked+8),
-			  *(uint64_t*)(cc), *(uint64_t*)(cc+8), cmc);
+	DEBUG(2, "RX login U%d (%s): hash=0x%s, cc=0x%s, cmc=%u",
+			  userid, fromaddr, tohexstr(unpacked, 16, 0), tohexstr(cc, 16, 1), cmc);
 
 	if (memcmp(logindata, unpacked, 16) != 0) {
 		write_dns(dns_fd, q, userid, NULL, 0, DH_ERR(BADLOGIN));
@@ -1613,21 +1579,21 @@ handle_dns_login(int dns_fd, struct query *q, uint8_t *unpacked,
 	}
 
 	/* calculate server-to-client authentication data */
-	login_calculate(logindata, server.passwordmd5, cc);
+	login_calculate(out, server.passwordmd5, cc);
 
-	/* Send ip/mtu/netmask info */
-	*(uint32_t *) out = server.my_ip;
-	*(uint32_t *) (out + 4) = u->tun_ip;
-	*(uint16_t *) (out + 8) = htons(server.mtu);
-	out[10] = server.netmask;
-	memcpy(out + 11, logindata, 16);
-
-	struct in_addr tunip;
-	tunip.s_addr = u->tun_ip;
-	char *s = inet_ntoa(tunip);
-	DEBUG(1, "User %d connected from %s, tun_ip %s, srv auth=0x%016llx%016llx",
-			userid, fromaddr, s, *(uint64_t*)logindata, *(uint64_t*)(logindata+8));
-	syslog(LOG_NOTICE, "accepted password from user #%d, given IP %s", userid, s);
+//	/* Send ip/mtu/netmask info */
+//	*(uint32_t *) out = server.my_ip;
+//	*(uint32_t *) (out + 4) = u->tun_ip;
+//	*(uint16_t *) (out + 8) = htons(server.mtu);
+//	out[10] = server.netmask;
+//	memcpy(out + 11, logindata, 16);
+//
+//	struct in_addr tunip;
+//	tunip.s_addr = u->tun_ip;
+//	char *s = inet_ntoa(tunip);
+	DEBUG(1, "User %d connected from %s, srv auth=0x%s",
+			userid, fromaddr, tohexstr(logindata, 16, 0));
+	syslog(LOG_NOTICE, "accepted login from user #%d", userid);
 
 	/* get HMAC key */
 	hmac_key_calculate(u->hmac_key, u->server_chall, 16, cc, 16, server.passwordmd5);
@@ -1653,13 +1619,11 @@ handle_null_request(int dns_fd, struct dns_packet *q, uint8_t *encdata, size_t e
 	cmd = toupper(encdata[0]);
 	DEBUG(3, "NULL request encdatalen %" L "u, cmd '%c'", encdatalen, cmd);
 
-	/* Pre-login commands: backwards compatible with protocol 00000402
-	 * TODO make replies also backwards compatible (without HMAC/codec bits) */
+	/* Pre-login commands: backwards compatible with protocol 00000402 */
 	if (cmd == 'V') { /* Version check - before userid is assigned */
 		handle_dns_version(dns_fd, q, encdata, encdatalen);
 		return;
-	}
-	else if (cmd == 'Y') { /* Downstream codec check - user independent */
+	} else if (cmd == 'Y') { /* Downstream codec check - user independent */
 		handle_dns_downstream_codec_check(dns_fd, q, encdata, encdatalen);
 		return;
 	}
@@ -1709,7 +1673,7 @@ handle_null_request(int dns_fd, struct dns_packet *q, uint8_t *encdata, size_t e
 
 	/* Login request - after version check successful, do not check auth yet */
 	if (cmd == 'L') {
-		handle_dns_login(dns_fd, q, unpacked, raw_len, userid, cmc);
+		handle_dns_login(dns_fd, q, unpacked + 4, raw_len - 4, userid, cmc);
 		return;
 	}
 
