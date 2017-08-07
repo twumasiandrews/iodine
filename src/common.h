@@ -41,7 +41,7 @@
 #define RAW_HDR_GET_USR(x)	((x)[RAW_HDR_CMD] & RAW_HDR_USR_MASK)
 
 #define MAX_CMC (0xFFFFFFFF)
-#define CMC(cmc) ((cmc + 1) == MAX_CMC ? 0 : (cmc++))
+#define CMC(cmc) (cmc = ((cmc + 1) == MAX_CMC ? 0 : (cmc + 1)))
 
 /* convert uppercase hex char [A-F0-9] to int */
 #define HEX2INT(c) 	((c >= 'A' && c <= 'F') ? (c - 'A' + 10) : (c - '0'))
