@@ -26,6 +26,19 @@ extern int stats;
 #define PENDING_QUERIES_LENGTH (MAX(this.windowsize_up, this.windowsize_down) * 4)
 #define INSTANCE this
 
+/* Upstream encoding tests */
+#define TEST_PAT64		"aAbBcCdDeEfFgGhHiIjJkKlLmMnNoOpPqQrRsStTuUvVwWxXyYzZ+0129-"
+#define TEST_PAT64U		"aAbBcCdDeEfFgGhHiIjJkKlLmMnNoOpPqQrRsStTuUvVwWxXyYzZ_0129-"
+#define TEST_PAT128A	"aA-Aaahhh-Drink-mal-ein-J\344germeister-"
+#define TEST_PAT128B	"aA-La-fl\373te-na\357ve-fran\347aise-est-retir\351-\340-Cr\350te"
+#define TEST_PAT128C	"aAbBcCdDeEfFgGhHiIjJkKlLmMnNoOpPqQrRsStTuUvVwWxXyYzZ"
+#define TEST_PAT128D	"aA0123456789\274\275\276\277" \
+      "\300\301\302\303\304\305\306\307\310\311\312\313\314\315\316\317"
+#define TEST_PAT128E	"aA" \
+      "\320\321\322\323\324\325\326\327\330\331\332\333\334\335\336\337" \
+      "\340\341\342\343\344\345\346\347\350\351\352\353\354\355\356\357" \
+      "\360\361\362\363\364\365\366\367\370\371\372\373\374\375"
+
 struct nameserv {
 	struct sockaddr_storage addr;
 	int len;
@@ -115,7 +128,6 @@ struct client_instance {
 	int compression_up;		/* Upstream/downstream compression flags */
 	int compression_down;
 	enum connection conn;	/* connection mode (NULL/RAW) */
-	long send_ping_soon;	/* if >0, force ping in # ms */
 	time_t lastdownstreamtime;	/* timestamp of last received packet from server */
 };
 

@@ -68,6 +68,7 @@ WSADATA wsa_data;
 /* special flags for write_dns */
 #define WD_AUTO (1 << 5)
 #define WD_OLD	(1 << 6)
+#define WD_CODECTEST (1 << 7)
 
 /* Ringbuffer Query Handling (qmem) and DNS Cache:
    This is used to make the handling duplicates and query timeouts simpler
@@ -987,9 +988,9 @@ raw_decode(uint8_t *packet, size_t len, struct pkt_metadata *m, int dns_fd)
 	memset(packet + RAW_HDR_HMAC, 0, RAW_HDR_HMAC_LEN);
 	hmac_md5(hmac, u->hmac_key, sizeof(u->hmac_key), packet, len);
 	if (memcmp(hmac, hmac_pkt, RAW_HDR_HMAC_LEN) != 0) {
-		DEBUG(3, "RX-raw: bad HMAC pkt=0x%016llx%016llx, actual=0x%016llx%016llx (%d)",
-				*(uint64_t*)hmac_pkt, *(uint64_t*)(hmac_pkt+8),
-				*(uint64_t*)hmac, *(uint64_t*)(hmac+8), RAW_HDR_HMAC_LEN);
+		DEBUG(3, "RX-raw: bad HMAC pkt=0x%s, actual=0x%s",
+				tohexstr(hmac_pkt, RAW_HDR_HMAC_LEN, 0),
+				tohexstr(hmac, RAW_HDR_HMAC_LEN, 1));
 	}
 
 	if (raw_cmd == RAW_HDR_CMD_LOGIN) {
@@ -1051,9 +1052,14 @@ write_dns(int fd, struct dns_packet *q, int userid, uint8_t *data, size_t datale
 		len = sizeof(tmpbuf);
 		if (userid < 0) { /* invalid userid: preauthenticated response */
 			downstream_encode(tmpbuf, &len, data, datalen, NULL, flags | DH_HMAC32, rand());
+		} else if ((flags & WD_CODECTEST) && datalen >= 4) {
+			downstream_encode(tmpbuf, &len, data, 4, users[userid].hmac_key,
+					flags & 0x1f, CMC(users[userid].cmc_down));
+			memcpy(tmpbuf + len, data + 4, datalen - 4);
+			len += datalen - 4;
 		} else {
 			downstream_encode(tmpbuf, &len, data, datalen, users[userid].hmac_key,
-				flags, CMC(users[userid].cmc_down));
+							flags, CMC(users[userid].cmc_down));
 		}
 	}
 
@@ -1162,16 +1168,57 @@ handle_dns_version(int dns_fd, struct dns_packet *q, uint8_t *encdata, size_t en
 }
 
 static void
-handle_dns_downstream_codec_check(int dns_fd, struct dns_packet *q, uint8_t *encdata, size_t encdatalen)
-/* this is a stub handler for deprecated command Y */
+handle_dns_codectest(int dns_fd, struct dns_packet *q, int userid, uint8_t *header, uint8_t *encdata, size_t encdatalen)
+/* header is 20 bytes (raw) base32 decoded from encdata+2 to encdata+34 */
 {
-	/* here the content of the query is ignored, and the answer is given solely
-	 * based on the query type for basic backwards compatibility
-	 * this works since the client always respects the server's downstream codec */
+	uint8_t reply[4096], qflags, ulq, flags, ulr, *p;
+	uint16_t dlq, dlr;
+	size_t replylen;
+	/* header is CMC+HMAC+flags+ulq+dlq */
+	p = header + 16;
+	qflags = *p++;
+	ulq = *p++;
+	readshort(header, &p, &dlq);
 
-	write_dns(dns_fd, q, -1, DOWNCODECCHECK1, DOWNCODECCHECK1_LEN, WD_OLD);
+	if (ulq > encdatalen - 34 || dlq > sizeof(reply)) {
+		write_dns(dns_fd, q, userid, NULL, 0, DH_ERR(BADOPTS));
+		return;
+	}
+
+	flags = qflags & 1;
+	/* check if q has EDNS0 OPT additional record present: see RFC 6891 */
+	for (uint8_t i = 0; i < q->arcount; i++) {
+		if (q->ar[i].type == 41) {
+			flags &= (1 << 1);
+		}
+	}
+
+	if (qflags & 1) { /* downstream codec test */
+		/* build downstream test data */
+		uint8_t dataqdec[255];
+		size_t declen = sizeof(dataqdec);
+		declen = b32->decode(dataqdec, &declen, encdata + 34, ulq);
+		p = encdata + 34;
+		for (uint16_t i = 0; i < dlq; i++) {
+			reply[4 + i] = p[i % ulq];
+		}
+		replylen = (dlr = dlq);
+	} else { /* upstream codec test */
+		/* encode dns-decoded query hostname as base32 */
+		replylen = sizeof(reply) - 4;
+		if (encdatalen > 255)
+			DEBUG(1, "upstream codec test query data >255!");
+		ulr = encdatalen;
+		replylen = (dlr = b32->encode(reply + 4, &replylen, encdata, encdatalen));
+	}
+	p = reply; /* make 4 bytes appended to CMC+HMAC */
+	putbyte(&p, flags);
+	putbyte(&p, ulr);
+	putshort(&p, dlr);
+	replylen += 4;
+
+	write_dns(dns_fd, q, userid, reply, replylen, WD_CODECTEST | C_BASE32);
 }
-
 
 static void
 handle_dns_ip_request(int dns_fd, struct query *q, int userid)
@@ -1196,24 +1243,6 @@ handle_dns_ip_request(int dns_fd, struct query *q, int userid)
 	}
 
 	write_dns(dns_fd, q, userid, reply, length, WD_AUTO);
-}
-
-static void
-handle_dns_upstream_codec_switch(int dns_fd, struct dns_packet *q, int userid,
-								 uint8_t *unpacked, size_t read)
-{
-	int codec;
-	struct encoder *enc;
-
-	codec = unpacked[0] & 7;
-
-	enc = get_encoder(codec);
-	if (enc == NULL && codec != CONN_RAW_UDP) {
-		write_dns(dns_fd, q, userid, "RAW", 3, WD_AUTO);
-		return;
-	}
-
-	write_dns(dns_fd, q, userid, enc->name, strlen(enc->name), WD_AUTO);
 }
 
 static void
@@ -1357,56 +1386,6 @@ handle_dns_set_options(int dns_fd, struct dns_packet *q, int userid,
 	users[userid].lazy = tmp_lazy;
 
 	write_dns(dns_fd, q, userid, encname, strlen(encname), WD_AUTO);
-}
-
-static void
-handle_dns_fragsize_probe(int dns_fd, struct query *q, int userid,
-						  uint8_t *unpacked, size_t read)
-/* Downstream fragsize probe packet */
-{
-	uint16_t req_frag_size;
-
-	req_frag_size = ntohs(*(uint16_t *) unpacked);
-	DEBUG(3, "Got downstream fragsize probe from user %d, required fragsize %d", userid, req_frag_size);
-
-	if (req_frag_size < 2 || req_frag_size > MAX_FRAGSIZE) {
-		write_dns(dns_fd, q, userid, NULL, 0, DH_ERR(BADOPTS));
-	} else {
-		uint8_t buf[MAX_FRAGSIZE];
-		unsigned int v = ((unsigned int) rand()) & 0xff;
-
-		memset(buf, 0, sizeof(buf));
-		*(uint16_t *) buf = htons(req_frag_size);
-		/* make checkable pseudo-random sequence */
-		buf[2] = 107;
-		for (int i = 3; i < MAX_FRAGSIZE; i++, v = (v + 107) & 0xff) {
-			buf[i] = v;
-		}
-		write_dns(dns_fd, q, userid, buf, req_frag_size, WD_AUTO);
-	}
-}
-
-static void
-handle_dns_set_fragsize(int dns_fd, struct query *q, int userid,
-						uint8_t *unpacked, size_t read)
-	/* Downstream fragsize packet */
-{
-	uint16_t max_frag_size;
-	uint8_t *p = unpacked;
-	readshort(unpacked, &p, &max_frag_size);
-
-	if (max_frag_size < 2 || max_frag_size > MAX_FRAGSIZE) {
-		write_dns(dns_fd, q, userid, NULL, 0, DH_ERR(BADOPTS));
-	} else {
-		users[userid].fragsize = max_frag_size;
-		// TODO more accurate max fragsize calculation
-		window_buffer_resize(users[userid].outgoing, users[userid].outgoing->length,
-				(get_encoder(users[userid].downenc)->get_raw_length(max_frag_size - DOWNSTREAM_PING_HDR)));
-		write_dns(dns_fd, q, userid, unpacked, 2, WD_AUTO);
-
-		DEBUG(1, "Setting max downstream data length to %u bytes for user %d; downenc %d",
-			  users[userid].outgoing->maxfraglen, userid, users[userid].downenc);
-	}
 }
 
 static void
@@ -1608,7 +1587,7 @@ handle_null_request(int dns_fd, struct dns_packet *q, uint8_t *encdata, size_t e
 	char cmd, userchar;
 	int userid = -1;
 	uint8_t hmac[16], hmac_pkt[16], enc = C_BASE32;
-	size_t hmaclen = 12, headerlen = 2;
+	size_t hmaclen = 12, headerlen = 2, pktlen, minlen;
 	uint32_t cmc;
 
 	/* Everything here needs at least 5 chars in the name:
@@ -1623,8 +1602,13 @@ handle_null_request(int dns_fd, struct dns_packet *q, uint8_t *encdata, size_t e
 	if (cmd == 'V') { /* Version check - before userid is assigned */
 		handle_dns_version(dns_fd, q, encdata, encdatalen);
 		return;
-	} else if (cmd == 'Y') { /* Downstream codec check - user independent */
-		handle_dns_downstream_codec_check(dns_fd, q, encdata, encdatalen);
+	} else if (cmd == 'Y') { /* Downstream codec check - unauthenticated */
+		/* Note: this is for simple backwards compatibility only but required
+		 * for older clients to reach the version check and fail correctly */
+		/* here the content of the query is ignored, and the answer is given solely
+		 * based on the query type for basic backwards compatibility
+		 * this works since the client always respects the server's downstream codec */
+		write_dns(dns_fd, q, -1, DOWNCODECCHECK1, DOWNCODECCHECK1_LEN, WD_OLD);
 		return;
 	}
 
@@ -1654,16 +1638,23 @@ handle_null_request(int dns_fd, struct dns_packet *q, uint8_t *encdata, size_t e
 		enc = users[userid].upenc;
 		hmaclen = 4;
 		headerlen = 1;
+		pktlen = encdatalen - 1;
+		minlen = 4 + 4;
+	} else if (cmd == 'U') { /* upstream codec check: nonstandard header */
+		pktlen = 20;
+		minlen = 20;
+	} else {
+		pktlen = encdatalen - headerlen; /* pktlen is length of packet to decode */
+		minlen = hmaclen + 4; /* minimum raw decoded length of header */
 	}
 
 	/* Following commands have everything after cmd and userid encoded
-	 *  All bytes that are not valid are decoded to 0
 	 *  Header consists of 4 bytes CMC + 4-12 bytes HMAC */
 	uint8_t unpacked[512], *p;
 	size_t raw_len;
 	raw_len = unpack_data(unpacked, sizeof(unpacked), encdata + headerlen,
-			encdatalen - headerlen, enc);
-	if (raw_len < hmaclen + 4) {
+			pktlen, enc);
+	if (raw_len < minlen) {
 		write_dns(dns_fd, q, userid, NULL, 0, DH_ERR(BADLEN));
 		return;
 	}
@@ -1685,41 +1676,33 @@ handle_null_request(int dns_fd, struct dns_packet *q, uint8_t *encdata, size_t e
 	4. Length (32 bits, network byte order) is prepended to the result from (3)
 	5. HMAC is calculated using the output from (4) and inserted into the HMAC
 		field in the data header. The data is then encoded (ie. base32 + dots)
-		and the query is sent.*/
+		and the query is sent. */
 	uint8_t hmacbuf[raw_len + 4 + headerlen];
-	memcpy(hmac_pkt, unpacked + 4, hmaclen);
 	p = hmacbuf;
-	putlong(&p, raw_len + headerlen);
-	memcpy(hmacbuf + 4, encdata, headerlen);
-	memcpy(hmacbuf + 4 + headerlen, unpacked, raw_len);	/* copy to temp buffer */
-	memset(hmacbuf + headerlen + 8, 0, hmaclen);
+	memcpy(hmac_pkt, unpacked + 4, hmaclen); /* backup HMAC from packet */
+	putlong(&p, raw_len + headerlen); /* 4 bytes length */
+	memcpy(hmacbuf + 4, encdata, headerlen); /* 1-2 bytes command and userid char */
+	memcpy(hmacbuf + 4 + headerlen, unpacked, raw_len);	/* copy signed data to tmp buffer */
+	memset(hmacbuf + headerlen + 8, 0, hmaclen); /* clear HMAC field */
 	hmac_md5(hmac, users[userid].hmac_key, 16, hmacbuf, sizeof(hmacbuf));
-	if (memcmp(hmac, hmac_pkt, hmaclen) != 0) {
-		DEBUG(2, "HMAC mismatch! pkt: 0x%016llx%016llx, actual: 0x%016llx%016llx (%" L "u)",
+	if (memcmp(hmac, hmac_pkt, hmaclen) != 0) { /* verify signed data */
+		DEBUG(2, "HMAC mismatch! pkt: 0x%s, actual: 0x%s (%" L "u)",
 			tohexstr(hmac_pkt, 16, 0),	tohexstr(hmac, 16, 1), hmaclen);
 		return;
 	}
 
-	if (cmd == 'd') { /* Upstream data packet: different encoding used */
-		handle_dns_data(dns_fd, q, unpacked, raw_len, userid);
-		return;
-	}
-
 	switch (cmd) {
+	case 'd':
+		handle_dns_data(dns_fd, q, unpacked, raw_len, userid);
+		break;
 	case 'I':
 		handle_dns_ip_request(dns_fd, q, userid);
 		break;
+	case 'U':
+		handle_dns_codectest(dns_fd, q, userid, unpacked, encdata, encdatalen);
+		break;
 	case 'O':
 		handle_dns_set_options(dns_fd, q, userid, unpacked, raw_len);
-		break;
-	case 'R':
-		handle_dns_fragsize_probe(dns_fd, q, userid, unpacked, raw_len);
-		break;
-	case 'S':
-		handle_dns_upstream_codec_switch(dns_fd, q, userid, unpacked, raw_len);
-		break;
-	case 'N':
-		handle_dns_set_fragsize(dns_fd, q, userid, unpacked, raw_len);
 		break;
 	case 'P':
 		handle_dns_ping(dns_fd, q, userid, unpacked, raw_len);

@@ -703,9 +703,9 @@ raw_validate(uint8_t **packet, size_t len, uint8_t *cmd)
 	memset(packet + RAW_HDR_HMAC, 0, RAW_HDR_HMAC_LEN);
 	hmac_md5(hmac, this.hmac_key, 16, *packet, len);
 	if (memcmp(hmac, hmac_pkt, RAW_HDR_HMAC_LEN) != 0) {
-		DEBUG(3, "RX-raw: bad HMAC pkt=0x%016llx%016llx, actual=0x%016llx%016llx (%d)",
-				*(uint64_t*)hmac_pkt, *(uint64_t*)(hmac_pkt+8),
-				*(uint64_t*)hmac, *(uint64_t*)(hmac+8), RAW_HDR_HMAC_LEN);
+		DEBUG(3, "RX-raw: bad HMAC pkt=0x%s, actual=0x%s (%d)",
+				tohexstr(hmac_pkt, RAW_HDR_HMAC_LEN, 0),
+				tohexstr(hmac_pkt, RAW_HDR_HMAC_LEN, 1), RAW_HDR_HMAC_LEN);
 		return 0;
 	}
 
@@ -745,16 +745,21 @@ handshake_waitdns(uint8_t *buf, size_t *buflen, char cmd, int timeout)
 		FD_SET(this.dns_fd, &fds);
 		r = select(this.dns_fd + 1, &fds, NULL, NULL, &tv);
 
-		if (r < 0)
+		if (r < 0) {
+			warn("select");
 			return -1;	/* select error */
-		if (r == 0)
+		} else if (r == 0) {
+			DEBUG(2, "timeout in handshake_waitdns, cmd '%c'", cmd);
 			return -3;	/* select timeout */
+		}
 
 		pktlen = sizeof(pkt);
-		if (!read_packet(this.dns_fd, pkt, &pktlen, &m))
+		if (!read_packet(this.dns_fd, pkt, &pktlen, &m)) {
 			return -1;	/* read error */
+		}
 
 		if ((q = dns_decode(pkt, pktlen)) == NULL) {
+			DEBUG(1, "got invalid DNS packet as reply, cmd '%c'", cmd);
 			return -1;	/* invalid DNS packet */
 		}
 
@@ -951,27 +956,38 @@ tunnel_dns()
 			return;
 
 		DEBUG(2, "RX: id %5d len=%" L "u name='%s'", q->id, format_host(q->q[0].name, q->q[0].namelen, 0));
+		memcpy(&q->m, &m, sizeof(m));
+		got_response(q->id, immediate, 0); /* Mark query as received */
 
 		datalen = sizeof(buf);
 		if (!dns_decode_data_answer(q, cbuf, &datalen)) /* cbuf contains data */
 			datalen = 0;
 		buflen = sizeof(buf);
-		if (!downstream_decode(buf, &buflen, cbuf, datalen, this.hmac_key) &&
-			(downstream_decode_err & DDERR_IS_ANS) && (downstream_decode_err & 7) == E_BADAUTH) {
-			this.num_badauth++;
-			if (this.num_badauth % 5 == 1) {
-				fprintf(stderr, "BADAUTH (%" L "d): Server rejected client authentication, or server "
-					"kicked us due to timeout. Will exit if no downstream data is received in 60 seconds.\n", this.num_badauth);
+		if (!downstream_decode(buf, &buflen, cbuf, datalen, this.hmac_key)) {
+			if ((downstream_decode_err & DDERR_IS_ANS) && (downstream_decode_err & 7) == E_BADAUTH) {
+				this.num_badauth++;
+				if (this.num_badauth % 5 == 1) {
+					fprintf(stderr, "BADAUTH (%" L "d): Server rejected client authentication, or server "
+						"kicked us due to timeout. Will exit if no downstream data is received in 60 seconds.\n", this.num_badauth);
+				}
+				return;	/* nothing done */
 			}
+			write_dns_error(q, 0);
+			if (q->rcode == SERVFAIL) { /* Maybe SERVFAIL etc */
+				handle_data_servfail();
+			}
+			dns_packet_destroy(q);
 			return;	/* nothing done */
 		}
-		memcpy(&q->m, &m, sizeof(m));
 		cmd = tolower(q->q[0].name[1]);
 
-		got_response(q->id, immediate, 0); /* Mark query as received */
+		/* don't handle anything that's not data or ping */
+		if (cmd != 'p' && cmd != this.userid_char) {
+			dns_packet_destroy(q);
+			return;	/* nothing done */
+		}
 	} else { /* CONN_RAW_UDP */
 		uint8_t *data = buf, cmd;
-
 		if (!raw_validate(&data, buflen, &cmd)) {
 			return;
 		}
@@ -992,70 +1008,30 @@ tunnel_dns()
 		return; /* all done */
 	}
 
-	/* Don't process anything that isn't data for us; usually error
-	   replies from fragsize probes etc. However a sequence of those,
-	   mostly 1 sec apart, will continuously break the >=2-second select
-	   timeout, which means we won't send a proper ping for a while.
-	   So make select a bit faster, <1sec. */
-	if (cmd != 'p' && cmd != this.userid_char) {
-		this.send_ping_soon = 700;
-		got_response(q->id, 0, 0);
-		dns_packet_destroy(q);
-		return;	/* nothing done */
-	}
-
-	if (buflen < DOWNSTREAM_DATA_HDR) {
-		/* Maybe SERVFAIL etc. Send ping to get things back in order,
-		   but wait a bit to prevent fast ping-pong loops.
-		   Only change options if user hasn't specified server timeout */
-		write_dns_error(q, 0);
-
-		if (q->rcode == SERVFAIL) {
-			handle_data_servfail();
-		}
-
-		this.send_ping_soon = 900;
-
-		dns_packet_destroy(q);
-		return;	/* nothing done */
-	}
-
-	this.send_query_recvcnt++;  /* unlikely we will ever overflow (2^64 queries is a LOT) */
-
-
-	/* Okay, we have a recent downstream packet */
-	this.lastdownstreamtime = time(NULL);
-
+	this.send_query_recvcnt++;  /* unlikely we will ever overflow (size_t is large) */
 	this.num_recv++;
+	this.lastdownstreamtime = time(NULL); /* recent downstream packet */
 
 	/* Decode the downstream data header and fragment-ify ready for processing */
 	f.data = buf;
-	if (!parse_data(cbuf, read, &f, &immediate, &ping)) {
-
+	if (!parse_data(buf, buflen, &f, &immediate, &ping)) {
+		DEBUG(1, "failed to parse downstream data/ping packet!");
+		return;
 	}
 
-	if ((debug >= 3 && ping) || (debug >= 2 && !ping))
+	if ((debug >= 3 && ping) || (debug >= 2 && !ping)) {
 		fprintf(stderr, " RX %s; frag ID %3u, ACK %3d, compression %d, datalen %" L "u, s%d e%d\n",
 				ping ? "PING" : "DATA", f.seqID, f.ack_other, f.compressed, f.len, f.start, f.end);
-
+	}
 
 	if (f.ack_other >= 0) {
 		window_ack(this.outbuf, f.ack_other);
 		window_tick(this.outbuf);
 	}
 
-	/* In lazy mode, we shouldn't get immediate replies to our most-recent
-	 query, only during heavy data transfer. Since this means the server
-	 doesn't have any packets to send, send one relatively fast (but not
-	 too fast, to avoid runaway ping-pong loops..) */
-	/* Don't send anything too soon; no data waiting from server */
-	if (f.len == 0) {
+	if (f.len == 0) { /* Apparently no data waiting from server */
 		if (!ping)
 			DEBUG(1, "[WARNING] Received downstream data fragment with 0 length and NOT a ping!");
-		if (!this.lazymode)
-			this.send_ping_soon = 100;
-		else
-			this.send_ping_soon = 700;
 		return;
 	}
 
@@ -1198,8 +1174,6 @@ client_tunnel()
 					if (timercmp(&nextresend, &tv, <))
 						tv = nextresend;
 				}
-
-				this.send_ping_soon = 0;
 			}
 		}
 
@@ -1231,12 +1205,6 @@ client_tunnel()
 				last_stats = time(NULL);
 
 			}
-		}
-
-		if (this.send_ping_soon && !use_min_send) {
-			tv.tv_sec = 0;
-			tv.tv_usec = this.send_ping_soon * 1000;
-			this.send_ping_soon = 0;
 		}
 
 		FD_ZERO(&fds);
@@ -1316,43 +1284,6 @@ client_tunnel()
 	return rv;
 }
 
-/* DEPRECATED */
-//static void
-//send_upenctest(char *s)
-///* NOTE: String may be at most 63-4=59 chars to fit in 1 dns chunk. */
-//{
-//	char buf[512] = "zCMC";
-//	size_t buf_space = 3;
-//	uint32_t cmc = rand();
-//
-//	b32->encode((uint8_t *)buf + 1, &buf_space, (uint8_t *) &cmc, 4);
-//
-//	/* Append test string without changing it */
-//	strncat(buf, ".", 512 - strlen(buf));
-//	strncat(buf, s, 512 - strlen(buf));
-//	strncat(buf, ".", 512 - strlen(buf));
-//	strncat(buf, this.topdomain, 512 - strlen(buf));
-//	send_query(buf, strlen(buf));
-//}
-
-//static void
-//send_downenctest(char downenc, int variant)
-//{
-//	uint8_t buf[512] = "yTaCMC.";
-//	size_t buf_space = 4;
-//
-//	buf[1] = tolower(downenc);
-//	buf[2] = b32_5to8(variant);
-//
-//	/* add 3 bytes base32 CMC (random) */
-//	uint32_t cmc = rand();
-//
-//	b32->encode(buf + 3, &buf_space, &cmc, 2);
-//	strncat(buf, ".", 512 - strlen(buf));
-//	strncat(buf, this.topdomain, 512 - strlen(buf));
-//	send_query(buf, strlen(buf));
-//}
-
 static void
 send_version(uint32_t version)
 {
@@ -1385,29 +1316,29 @@ send_login(uint8_t *login, uint8_t *cc)
 }
 
 static void
-send_fragsize_probe(uint16_t fragsize)
+send_codectest(uint8_t *dataq, uint8_t dqlen, uint16_t drlen, int dnchk)
+/* dnchk == 1: downstream codec check; dnchk == 0: upstream */
 {
-	uint8_t data[256];
+	uint8_t buf[34 + dqlen], hmac[16], header[4 + 20], *p, *hp;
+	p = header;
+	putlong(&p, 20); /* HMAC-only length field */
+	putlong(&p, CMC(this.cmc_up));
+	memset((hp = p), 0, 12); /* clear HMAC field */
+	putbyte(&p, (dnchk & 1)); /* 1 byte flags */
+	putbyte(&p, dqlen);
+	putshort(&p, drlen);
+	hmac_md5(hmac, this.hmac_key, 16, header, sizeof(header));
+	memcpy(header + 8, hmac, 12);
 
-	/* Probe downstream fragsize packet */
+	buf[0] = 'u';
+	buf[1] = this.userid_char;
+	size_t buflen = 32;
+	if (b32->encode(buf + 2, &buflen, header + 4, 20) != 32)
+		DEBUG(1, "upenctest got wrong encoded headerlen!");
+	/* Append codec test data without changing it */
+	memcpy(buf + 34, dataq, dqlen);
 
-	/* build a large query domain which is random and maximum size,
-	 * will also take up maximum space in the return packet */
-	memset(data, MAX(1, this.rand_seed & 0xff), sizeof(data));
-
-	*(uint16_t *) (data) = htons(fragsize);
-	this.rand_seed++;
-
-	send_packet('r', data, sizeof(data), 12);
-}
-
-static void
-send_set_downstream_fragsize(uint16_t fragsize)
-{
-	uint8_t data[2];
-	*(uint16_t *) data = htons(fragsize);
-
-	send_packet('n', data, sizeof(data), 12);
+	send_query(buf, sizeof(buf));
 }
 
 static void
@@ -1423,12 +1354,6 @@ send_raw_udp_login()
 	get_rand_bytes(buf, sizeof(buf));
 	send_raw(this.dns_fd, buf, sizeof(buf), this.userid, RAW_HDR_CMD_LOGIN,
 			CMC(this.cmc_up), this.hmac_key, &this.raw_serv, this.raw_serv_len);
-}
-
-static void
-send_codec_switch(uint8_t bits)
-{
-	send_packet('s', &bits, 1, 12);
 }
 
 static void
@@ -1487,6 +1412,12 @@ send_server_options(int lazy, int compression, char denc)
 
 
 	send_packet('o', &optflags, 1, 12);
+}
+
+static void
+send_connection_request()
+{
+// TODO connection request
 }
 
 /* takes server challenge (16 bytes) as argument */
@@ -1604,7 +1535,7 @@ handshake_raw_udp()
 
 	fprintf(stderr, "Testing raw UDP data to the server (skip with -r)");
 	for (int i = 0; this.running && i < 3; i++) {
-		send_ip_request();
+		send_ip_request(); /* get server IP address */
 		fprintf(stderr, ".");
 		fflush(stderr);
 		len = sizeof(in);
@@ -1621,8 +1552,7 @@ handshake_raw_udp()
 			this.raw_serv_len = sizeof(struct sockaddr_in);
 			got_addr = 1;
 			break;
-		}
-		if (len == 17 && in[0] == 16) {
+		} else if (len == 17 && in[0] == 16) {
 			/* Received IPv6 address */
 			struct sockaddr_in6 *raw6_serv = (struct sockaddr_in6 *) &this.raw_serv;
 			raw6_serv->sin6_family = AF_INET6;
@@ -1632,7 +1562,7 @@ handshake_raw_udp()
 			got_addr = 1;
 			break;
 		}
-
+		DEBUG(1, "got invalid external IP: datalen %" L "u, data[0] %hhu", in[0]);
 	}
 	fprintf(stderr, "\n");
 	if (!this.running)
@@ -1683,65 +1613,127 @@ handshake_raw_udp()
 }
 
 static int
-handshake_upenctest(char *s)
-/* NOTE: *s may be max 59 chars; must start with "aA" for case-swap check
-   Returns:
+handle_codectest(uint8_t **ans, size_t *anslen, uint16_t *drlen, uint8_t *ulr, uint8_t *flags)
+/* *ans is DNS-decoded answer data, *anslen is set to amount of data after header */
+{
+	uint8_t header[30], hmac_real[16], hmac_pkt[12], *p = header;
+	uint32_t cmc;
+	if (*anslen < 32) {
+		return 0; /* header is too short (32 bytes base32)! abandon! */
+	}
+	size_t hlen = 20;
+	putlong(p, 20);
+	if (b32->decode(header, &hlen, *p, 32) != 20) {
+		DEBUG(1, "b32 wrong decode len!");
+		return 0;
+	}
+	readlong(header, &p, &cmc); /* TODO: check CMC */
+	readdata(&p, hmac_pkt, 12); /* read and clear HMAC */
+	memset((p - 12), 0, 12);
+	flags = *p++;
+	*ulr = *p++;
+	readshort(header, &p, drlen);
+
+	/* validate HMAC */
+	hmac_md5(hmac_real, this.hmac_key, 16, header, 24);
+	if (memcmp(hmac_real, hmac_pkt, 12) != 0) {
+		DEBUG(1, "RX codectest: bad HMAC pkt=0x%s, actual=0x%s (12)",
+				tohexstr(hmac_pkt, 12, 0), tohexstr(hmac_real, 12, 1));
+		return 0;
+	} else {
+		return 1;
+	}
+}
+
+static int
+codectest_validate(uint8_t *test, size_t testlen, uint8_t *datar, size_t datarlen)
+/* returns:
+   -2: test data was truncated
    -1: case swap, no need for any further test: error printed; or Ctrl-C
-   0: not identical or error or timeout
-   1: identical string returned
+   0: not identical or error or timeout: error printed
+   1: identical string returned */
+{
+	if (datarlen != testlen) {
+		/* length mismatch: definitely unreliable */
+		fprintf(stderr, "Test data length mismatch, retrying...\n");
+		return -2;
+	}
+
+	/* quick check if case swapped, to give informative error msg */
+	if (*datar == 'A' || *(datar + 1) == 'a') {
+		fprintf(stderr, "data changed to %scase, keeping codec Base32\n",
+				(*datar == 'A') ? "upper" : "lower");
+		return -1;
+	}
+
+	for (int k = 0; k < testlen; k++) {
+		uint8_t orig, newc;
+
+		if (datar[k] != test[k]) {
+			/* Definitely not reliable */
+			if (isprint(datar[k]) && isprint(test[k])) {
+				fprintf(stderr, "Char '%c' gets changed into '%c'\n",
+					test[k], datar[k]);
+			} else {
+				fprintf(stderr, "Byte 0x%02X gets changed into 0x%02X\n",
+					test[k], datar[k]);
+			}
+			return 0;
+		}
+	}
+	return 1; /* identical string */
+}
+
+static int
+handshake_codectest(uint8_t *s, size_t slen, int dn, size_t testlen)
+/* NOTE: *s must start with "aA" for case-swap check.
+   dn==1 for downstream check, 0 for upstream check
+   testlen is length of hostname (dn==0) or reply RDATA (dn==1) to fill
+   Returns same as codectest_validate
 */
 {
-	char in[4096];
-	unsigned char *uin = (unsigned char *) in;
-	unsigned char *us = (unsigned char *) s;
-	int i, read, slen;
+	uint8_t in[4096], test[4096], ulr, flags;
+	uint16_t drlen;
+	int ret;
+	size_t inlen;
+	char *stream = dn ? "downstream" : "upstream";
 
-	slen = strlen(s);
-	for (i=0; this.running && i<3 ;i++) {
+	for (size_t i = 0; i < testlen; i++) {
+		test[i] = s[i % slen];
+	}
 
-		// TODO fix upenctest
-//		send_upenctest(s);
-
-		read = handshake_waitdns(in, sizeof(in), 'Z', i+1);
-
-		if (read == -2)
-			return 0;	/* hard error */
-
-		if (read > 0 && read < slen + 4)
-			return 0;	/* reply too short (chars dropped) */
-
-		if (read > 0) {
-			int k;
-			/* quick check if case swapped, to give informative error msg */
-			if (in[4] == 'A') {
-				fprintf(stderr, "DNS queries get changed to uppercase, keeping upstream codec Base32\n");
-				return -1;
-			}
-			if (in[5] == 'a') {
-				fprintf(stderr, "DNS queries get changed to lowercase, keeping upstream codec Base32\n");
-				return -1;
-			}
-
-			for (k = 0; k < slen; k++) {
-				if (in[k+4] != s[k]) {
-					/* Definitely not reliable */
-					if (in[k+4] >= ' ' && in[k+4] <= '~' &&
-					    s[k] >= ' ' && s[k] <= '~') {
-						fprintf(stderr, "DNS query char '%c' gets changed into '%c'\n",
-							s[k], in[k+4]);
-					} else {
-						fprintf(stderr, "DNS query char 0x%02X gets changed into 0x%02X\n",
-							(unsigned int) us[k],
-							(unsigned int) uin[k+4]);
-					}
-					return 0;
-				}
-			}
-			/* if still here, then all okay */
-			return 1;
+	for (int i = 0; this.running && i < 3; i++) {
+		if (dn) {
+			send_codectest(s, slen, testlen, 1);
+		} else {
+			send_codectest(test, testlen, 0, 0);
 		}
 
-		fprintf(stderr, "Retrying upstream codec test...\n");
+		inlen = sizeof(in);
+		if ((ret = handshake_waitdns(in, &inlen, 'U', i + 1)) == -2) {
+			return 0;	/* hard error */
+		} else if (ret != 0) { /* other error, decoding error (0) is expected */
+			fprintf(stderr, "Retrying %s codec test...\n", stream);
+			continue;
+		} else if (inlen < 32) {
+			fprintf(stderr, "Reply header corrupted, may be truncated.");
+			continue;	/* reply too short (chars dropped) */
+		}
+		
+		uint8_t *datar = in;
+		if (!handle_codectest(&datar, &inlen, &drlen, &ulr, &flags)) {
+			fprintf(stderr, "Got bad header, retrying...\n");
+			continue;
+		}
+
+		if (dn) { /* downstream check: datar is repeated base32 decoded dataq */
+			return codectest_validate(test, testlen, datar, inlen);
+		} else { /* upstream check: datar is base32 encoded dataq */
+			uint8_t buf[4096];
+			size_t buflen = sizeof(buf);
+			buflen = b32->decode(buf, &buflen, datar, inlen);
+			return codectest_validate(test, testlen, buf, buflen);
+		}
 	}
 
 	if (!this.running)
@@ -1751,99 +1743,54 @@ handshake_upenctest(char *s)
 	return 0;
 }
 
-static int
+static uint8_t
 handshake_upenc_autodetect()
-/* Returns:
-   0: keep Base32
-   1: Base64 is okay
-   2: Base64u is okay
-   3: Base128 is okay
-*/
+/* Returns: codec ID of detected codec */
 {
-	/* Note: max 59 chars, must start with "aA".
+	static struct upenctest {
+		char *data;
+		size_t datalen;
+		int rating;
+		uint8_t codec;
+	} cases[] = {
+			/* Try Base128, starting very gently to not draw attention */
+			{ TEST_PAT128A, sizeof(TEST_PAT128A) - 1, 0, C_BASE32 },
+			{ TEST_PAT128B, sizeof(TEST_PAT128B) - 1, 0, C_BASE32 },
+			{ TEST_PAT128C, sizeof(TEST_PAT128C) - 1, 0, C_BASE32 },
+			{ TEST_PAT128D, sizeof(TEST_PAT128D) - 1, 0, C_BASE32 },
+			{ TEST_PAT128E, sizeof(TEST_PAT128E) - 1, 9, C_BASE128 },
+			/* Try Base64 (with plus sign) */
+			{ TEST_PAT64, sizeof(TEST_PAT64) - 1, 5, C_BASE64 },
+			/* Try Base64u (with _u_nderscore) */
+			{ TEST_PAT64U, sizeof(TEST_PAT64U) - 1, 3, C_BASE64U },
+
+	};
+	/* Note: must start with "aA" for case chec.
 	   pat64: If 0129 work, assume 3-8 are okay too.
 
 	   RFC1035 par 2.3.1 states that [A-Z0-9-] allowed, but only
 	   [A-Z] as first, and [A-Z0-9] as last char _per label_.
 	   Test by having '-' as last char.
 	 */
-        char *pat64="aAbBcCdDeEfFgGhHiIjJkKlLmMnNoOpPqQrRsStTuUvVwWxXyYzZ+0129-";
-        char *pat64u="aAbBcCdDeEfFgGhHiIjJkKlLmMnNoOpPqQrRsStTuUvVwWxXyYzZ_0129-";
-        char *pat128a="aA-Aaahhh-Drink-mal-ein-J\344germeister-";
-        char *pat128b="aA-La-fl\373te-na\357ve-fran\347aise-est-retir\351-\340-Cr\350te";
-        char *pat128c="aAbBcCdDeEfFgGhHiIjJkKlLmMnNoOpPqQrRsStTuUvVwWxXyYzZ";
-        char *pat128d="aA0123456789\274\275\276\277"
-		      "\300\301\302\303\304\305\306\307\310\311\312\313\314\315\316\317";
-        char *pat128e="aA"
-		      "\320\321\322\323\324\325\326\327\330\331\332\333\334\335\336\337"
-		      "\340\341\342\343\344\345\346\347\350\351\352\353\354\355\356\357"
-		      "\360\361\362\363\364\365\366\367\370\371\372\373\374\375";
-	int res;
 
-	/* Try Base128, starting very gently to not draw attention */
-	while (1) {
-		res = handshake_upenctest(pat128a);
-		if (res < 0) {
-			/* DNS swaps case, msg already printed; or Ctrl-C */
-			return 0;
-		} else if (res == 0) {
-			/* Probably not okay, skip Base128 entirely */
-			break;
+	int res, highest = -10000;
+	size_t highestid;
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		if ((res = handshake_codectest((uint8_t *) cases[i].data,
+				cases[i].datalen, 0, this.hostname_maxlen)) < 0) {
+			return C_BASE32; /* DNS swaps case, msg already printed; or Ctrl-C */
+		} else if (res == 0) { /* data was changed */
+			continue;
 		}
 
-		res = handshake_upenctest(pat128b);
-		if (res < 0)
-			return 0;
-		else if (res == 0)
-			break;
-
-		/* if this works, we can test the real stuff */
-
-		res = handshake_upenctest(pat128c);
-		if (res < 0)
-			return 0;
-		else if (res == 0)
-			break;
-
-		res = handshake_upenctest(pat128d);
-		if (res < 0)
-			return 0;
-		else if (res == 0)
-			break;
-
-		res = handshake_upenctest(pat128e);
-		if (res < 0)
-			return 0;
-		else if (res == 0)
-			break;
-
-		/* if still here, then base128 works completely */
-		return 3;
+		if (cases[i].rating > highest) {
+			highestid = i;
+			highest = cases[i].rating;
+		}
 	}
 
-	/* Try Base64 (with plus sign) */
-	res = handshake_upenctest(pat64);
-	if (res < 0) {
-		/* DNS swaps case, msg already printed; or Ctrl-C */
-		return 0;
-	} else if (res > 0) {
-		/* All okay, Base64 msg will be printed later */
-		return 1;
-	}
-
-	/* Try Base64u (with _u_nderscore) */
-	res = handshake_upenctest(pat64u);
-	if (res < 0) {
-		/* DNS swaps case, msg already printed; or Ctrl-C */
-		return 0;
-	} else if (res > 0) {
-		/* All okay, Base64u msg will be printed later */
-		return 2;
-	}
-
-	/* if here, then nonthing worked */
-	fprintf(stderr, "Keeping upstream codec Base32\n");
-	return 0;
+	return cases[highestid].codec;
 }
 
 static int
@@ -2074,11 +2021,10 @@ handshake_edns0_check()
    1: EDNS0 works
 */
 {
-	char in[4096];
-	int i;
-	int read;
-	char *s = DOWNCODECCHECK1;
-        int slen = DOWNCODECCHECK1_LEN;
+	uint8_t in[4096];
+	size_t len, slen = DOWNCODECCHECK1_LEN;
+	int i, ret;
+	uint8_t s[] = DOWNCODECCHECK1;
 	char trycodec;
 
 	if (this.do_qtype == T_NULL)
@@ -2086,17 +2032,15 @@ handshake_edns0_check()
 	else
 		trycodec = 'T';
 
-	for (i=0; this.running && i<3 ;i++) {
+	for (i = 0; this.running && i < 3; i++) {
 
-//		send_downenctest(trycodec, 1); TODO fix edns0 check
-
-		read = handshake_waitdns(in, sizeof(in), 'Y', i+1);
-
-		if (read == -2)
-			return 0;	/* hard error */
-
-		if (read > 0 && read != slen)
-			return 0;	/* reply incorrect = unreliable */
+//		send_downenctest(trycodec, 1); // TODO fix edns0 check
+		len = sizeof(in);
+		if ((ret = handshake_waitdns(in, len, 'Y', i+1)) == -2) {
+			return 0; /* hard error */
+		} else if (ret == 1 && len != slen) {
+			return 0;	/* reply length incorrect = unreliable */
+		}
 
 		if (read > 0) {
 			int k;
@@ -2139,7 +2083,7 @@ handshake_switch_codec(int bits)
 
 	for (i=0; this.running && i<5 ;i++) {
 
-		send_codec_switch(bits);
+//		send_codec_switch(bits); TODO codec switch with options
 
 		read = handshake_waitdns(in, sizeof(in), 'S', i+1);
 
@@ -2348,7 +2292,7 @@ handshake_autoprobe_fragsize()
 		/* stop the slow probing early when we have enough bytes anyway */
 		for (i=0; this.running && i<3 ;i++) {
 
-			send_fragsize_probe(proposed_fragsize);
+//			send_fragsize_probe(proposed_fragsize); TODO send fragsize probe as codec test
 
 			read = handshake_waitdns(in, sizeof(in), 'R', 1);
 
@@ -2414,7 +2358,7 @@ handshake_set_fragsize(int fragsize)
 	fprintf(stderr, "Setting downstream fragment size to max %d...\n", fragsize);
 	for (i=0; this.running && i<5 ;i++) {
 
-		send_set_downstream_fragsize(fragsize);
+//		send_set_downstream_fragsize(fragsize); TODO set downstream fragsize with options
 
 		read = handshake_waitdns(in, sizeof(in), 'N', i+1);
 
@@ -2507,20 +2451,21 @@ client_handshake()
 		return r;
 	}
 
-	/* test raw UDP mode */
-	if (this.raw_mode && handshake_raw_udp()) {
-		this.conn = CONN_RAW_UDP;
-		this.max_timeout_ms = 10000;
-		this.compression_down = 1;
-		this.compression_up = 1;
-		return 0;
-	}
-
-	/* using CONN_DNS_NULL */
-	if (this.raw_mode == 0) {
+	/* now that we are authenticated, try to find best possible settings */
+	if (this.raw_mode) {
+		if (handshake_raw_udp()) { /* test sending UDP packets */
+			this.conn = CONN_RAW_UDP;
+			this.max_timeout_ms = 10000;
+			this.compression_down = 1;
+			this.compression_up = 1;
+			fprintf(stderr, "Sending raw UDP traffic directly to %s\n", client_get_raw_addr());
+			return 0;
+		}
+	} else {
 		fprintf(stderr, "Skipping raw mode\n");
 	}
 
+	/* using CONN_DNS_NULL */
 	dnsc_use_edns0 = 1;
 	if (handshake_edns0_check() && this.running) {
 		fprintf(stderr, "Using EDNS0 extension\n");
