@@ -223,7 +223,7 @@ int
 downstream_encode(uint8_t *out, size_t *outlen, uint8_t *data, size_t datalen,
 				uint8_t *hmac_key, uint8_t flags, uint32_t cmc)
 /* Adds downstream header (flags+CMC+HMAC) to given data and encode
- * returns #bytes that were encoded */
+ * returns 1 on success, 0 on failure */
 {
 	size_t hmaclen;
 	uint32_t len;
@@ -270,14 +270,18 @@ int
 downstream_decode(uint8_t *out, size_t *outlen, uint8_t *encdata, size_t encdatalen, uint8_t *hmac_key)
 /* validate downstream header + HMAC, decode data
  * note: exact reverse of downstream_encode
- * returns 1 on success, 0 with error and sets downstream_decode_err to error code */
+ * returns 1 on success, 0 with error and sets downstream_decode_err to error code
+ * if decode error occurs or bad HMAC, encdata is simply copied to out */
 {
-	if (encdatalen < 2)
-		return 0;
-
+	uint8_t hmac[16], hmac_pkt[16], hmacbuf[encdatalen + 4], *p, flags, error;
 	size_t hmaclen;
 	uint32_t len;
-	uint8_t flags = b32_8to5(encdata[0]), error;
+
+	if (encdatalen < 2) {
+		goto _dderr;
+	}
+
+	flags = b32_8to5(encdata[0]);
 
 	hmaclen = flags & DH_HMAC32 ? 4 : 12;
 
@@ -288,7 +292,7 @@ downstream_decode(uint8_t *out, size_t *outlen, uint8_t *encdata, size_t encdata
 		if (hmaclen == 4) {
 			DEBUG(2, "server says 32-bit HMAC with error flag set!");
 			downstream_decode_err = DDERR_BADHMAC;
-			return 0;
+			goto _dderr;
 		}
 		flags = C_BASE32; /* HMAC and CMC are still present with error */
 	}
@@ -297,7 +301,6 @@ downstream_decode(uint8_t *out, size_t *outlen, uint8_t *encdata, size_t encdata
 	 * 4 bytes CMC (network byte order) (random for pre-login responses)
 	 * 4 or 12 bytes HMAC (note: HMAC field is 32-bits random for all pre-login responses)
 	 * for HMAC calculation (in hmacbuf): length + flags + CMC + hmac + data */
-	uint8_t hmac[16], hmac_pkt[16], hmacbuf[encdatalen + 4], *p;
 
 	/* decode data first */
 	len = unpack_data(hmacbuf + 5, encdatalen - 1,
@@ -305,7 +308,7 @@ downstream_decode(uint8_t *out, size_t *outlen, uint8_t *encdata, size_t encdata
 	if (len < 4 + hmaclen) {
 		/* packet length must at least match flags */
 		downstream_decode_err = DDERR_TOOSHORT;
-		return 0;
+		goto _dderr;
 	}
 
 	if (hmac_key) {
@@ -319,11 +322,11 @@ downstream_decode(uint8_t *out, size_t *outlen, uint8_t *encdata, size_t encdata
 			DEBUG(3, "RX: bad HMAC pkt=%s, actual=%s",
 					tohexstr(hmac_pkt, hmaclen, 0), tohexstr(hmac, hmaclen, 1));
 			downstream_decode_err = DDERR_BADHMAC;
-			return 0;
+			goto _dderr;
 		}
 	}
 	if (*outlen < len - 4 - hmaclen) {
-		return 0;
+		goto _dderr;
 	}
 	memcpy(out, hmacbuf + 9 + hmaclen, len - 4 - hmaclen);
 	*outlen = len - 4 - hmaclen;
@@ -332,8 +335,10 @@ downstream_decode(uint8_t *out, size_t *outlen, uint8_t *encdata, size_t encdata
 		return 1;
 	} else {
 		downstream_decode_err = error | DDERR_IS_ANS;
-		return 0;
 	}
+_dderr:
+	*outlen = MIN(*outlen, encdatalen);
+	return memcpy(out, encdata, *outlen), 0;
 }
 
 
