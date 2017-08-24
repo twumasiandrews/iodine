@@ -49,6 +49,7 @@
 #include "util.h"
 #include "encoding.h"
 #include "base32.h"
+#include "read.h"
 #include "md5.h"
 
 #ifdef WINDOWS32
@@ -82,13 +83,14 @@ struct client_instance this;
 /* static startup values - should not be changed in presets */
 #define PRESET_STATIC_VALUES \
 	.conn = CONN_DNS_NULL, \
-	.send_ping_soon = 1, \
 	.maxfragsize_up = 100, \
 	.next_downstream_ack = -1, \
 	.num_immediate = 1, \
 	.rtt_total_ms = 200, \
 	.downstream_delay_variance = 2.0, \
 	.autodetect_delay_variance = 0, \
+	.enc_down = C_UNSET, \
+	.enc_up = C_UNSET, \
 	.remote_forward_addr = {.ss_family = AF_UNSPEC}
 
 static struct client_instance preset_default = {
@@ -99,7 +101,6 @@ static struct client_instance preset_default = {
 	.server_timeout_ms = 4000,
 	.downstream_timeout_ms = 2000,
 	.autodetect_server_timeout = 1,
-	.dataenc = &base32_encoder,
 	.autodetect_frag_size = 1,
 	.maxfragsize_down = MAX_FRAGSIZE,
 	.compression_up = 1,
@@ -107,7 +108,6 @@ static struct client_instance preset_default = {
 	.windowsize_up = 8,
 	.windowsize_down = 8,
 	.hostname_maxlen = 0xFF,
-	.downenc = ' ',
 	.do_qtype = T_UNSET,
 	PRESET_STATIC_VALUES
 };
@@ -123,12 +123,10 @@ static struct client_instance preset_original = {
 	.windowsize_up = 1,
 	.hostname_maxlen = 0xFF,
 	.downstream_timeout_ms = 4000,
-	.dataenc = &base32_encoder,
 	.autodetect_frag_size = 1,
 	.maxfragsize_down = MAX_FRAGSIZE,
 	.compression_down = 1,
 	.compression_up = 0,
-	.downenc = ' ',
 	.do_qtype = T_UNSET,
 	PRESET_STATIC_VALUES
 };
@@ -141,7 +139,6 @@ static struct client_instance preset_fast = {
 	.server_timeout_ms = 2500,
 	.downstream_timeout_ms = 100,
 	.autodetect_server_timeout = 1,
-	.dataenc = &base32_encoder,
 	.autodetect_frag_size = 1,
 	.maxfragsize_down = 1176,
 	.compression_up = 1,
@@ -149,7 +146,6 @@ static struct client_instance preset_fast = {
 	.windowsize_up = 30,
 	.windowsize_down = 30,
 	.hostname_maxlen = 0xFF,
-	.downenc = ' ',
 	.do_qtype = T_UNSET,
 	PRESET_STATIC_VALUES
 };
@@ -162,7 +158,6 @@ static struct client_instance preset_fallback = {
 	.server_timeout_ms = 500,
 	.downstream_timeout_ms = 1000,
 	.autodetect_server_timeout = 1,
-	.dataenc = &base32_encoder,
 	.autodetect_frag_size = 1,
 	.maxfragsize_down = 500,
 	.compression_up = 1,
@@ -170,7 +165,6 @@ static struct client_instance preset_fallback = {
 	.windowsize_up = 1,
 	.windowsize_down = 1,
 	.hostname_maxlen = 100,
-	.downenc = 'T',
 	.do_qtype = T_CNAME,
 	PRESET_STATIC_VALUES
 };
@@ -254,9 +248,10 @@ help()
 	print_usage();
 	fprintf(stderr, "\nOptions to try if connection doesn't work:\n");
 	fprintf(stderr, "  -T  use DNS type: NULL, PRIVATE, TXT, SRV, MX,\n");
-	fprintf(stderr, "        DNAME, PTR, CNAME, A6, AAAA, A (default: autodetect)\n");
-	fprintf(stderr, "  -O  use specific downstream encoding for queries: Base32, Base64, Base64u,\n");
-	fprintf(stderr, "        Base128, or (only for TXT:) Raw  (default: autodetect)\n");
+	fprintf(stderr, "        DNAME, PTR, CNAME, A, AAAA, A6 (default: autodetect)\n");
+	fprintf(stderr, "  -N  use specific upstream encoding for queries: Base32, Base64, Base64u,\n");
+	fprintf(stderr, "        Base128 or Raw  (default: Base32 for login, then autodetect)\n");
+	fprintf(stderr, "  -O  use specific downstream encoding for queries: same as -N\n");
 	fprintf(stderr, "  -I  target interval between sending and receiving requests (default: 4 secs)\n");
 	fprintf(stderr, "        or ping interval in immediate mode (default: 1 sec)\n");
 	fprintf(stderr, "  -s  minimum interval between queries (default: 0ms)\n");
@@ -269,7 +264,7 @@ help()
 	fprintf(stderr, "Fine-tuning options:\n");
 	fprintf(stderr, "  -w  downstream fragment window size (default: 8 frags)\n");
 	fprintf(stderr, "  -W  upstream fragment window size (default: 8 frags)\n");
-//	fprintf(stderr, "  -k  max retries for sending packets (default: 0, retries disabled)\n");
+	fprintf(stderr, "  -k  max retries for sending packets (default: 0, retries disabled)\n");
 	fprintf(stderr, "  -i  server-side request timeout in lazy mode (default: auto)\n");
 	fprintf(stderr, "  -j  downstream fragment ACK timeout, implies -i4 (default: 2 sec)\n");
 	fprintf(stderr, "  -J  downstream fragment ACK delay variance factor (default: 2.0), 0: auto\n");
@@ -422,7 +417,6 @@ main(int argc, char **argv)
 		{"chrootdir", required_argument, 0, 't'},
 		{"preset", required_argument, 0, 'Y'},
 		{"proxycommand", no_argument, 0, 'R'},
-//		{"nodrop", no_argument, 0, OPT_NODROP},
 		{"remote", required_argument, 0, 'R'},
 		{NULL, 0, 0, 0}
 	};
@@ -431,7 +425,7 @@ main(int argc, char **argv)
 	 * This is so that all options override preset values regardless of order in command line */
 	int optind_orig = optind, preset_id = -1;
 
-	static char *iodine_args_short = "46vfDhrY:s:V:c:C:i:j:J:u:t:d:R:P:w:W:m:M:F:T:O:L:I:";
+	static char *iodine_args_short = "46vfDhrY:s:V:c:C:i:j:J:u:t:d:R:P:w:W:m:M:F:T:N:O:L:I:k:";
 
 	while ((choice = getopt_long(argc, argv, iodine_args_short, iodine_args, NULL))) {
 		/* Check if preset has been found yet so we don't process any other options */
@@ -552,11 +546,15 @@ main(int argc, char **argv)
 			pidfile = optarg;
 			break;
 		case 'T':
-			if (client_set_qtype(optarg))
+			if ((this.do_qtype = get_qtype_from_name(optarg)) == T_UNSET)
 				errx(5, "Invalid query type '%s'", optarg);
 			break;
+		case 'N':
+			if ((this.enc_up = get_codec_from_name(optarg)) == C_UNSET)
+				errx(6, "Invalid encoding type '%s'", optarg);
+			break;
 		case 'O':
-			if ((this.downenc = parse_encoding(optarg)) == 0)
+			if ((this.enc_down = get_codec_from_name(optarg)) == C_UNSET)
 				errx(6, "Invalid encoding type '%s'", optarg);
 			break;
 		case 'L':
@@ -589,6 +587,10 @@ main(int argc, char **argv)
 				this.autodetect_delay_variance = 1;
 				this.downstream_delay_variance = 2.0;
 			}
+			break;
+		case 'k':
+			if ((this.max_retries = strtol(optarg, NULL, 0)) < 0)
+				errx(7, "Invalid max retries, must be >= 0: %u", this.max_retries);
 			break;
 		case 's':
 			this.send_interval_ms = atoi(optarg);
@@ -788,10 +790,6 @@ main(int argc, char **argv)
 	}
 
 	// TODO request data connection here.
-
-	if (this.conn == CONN_RAW_UDP) {
-		fprintf(stderr, "Sending raw UDP traffic directly to %s\n", client_get_raw_addr());
-	}
 
 	fprintf(stderr, "Connection setup complete, transmitting data.\n");
 
