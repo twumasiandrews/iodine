@@ -38,6 +38,7 @@ extern int stats;
       "\320\321\322\323\324\325\326\327\330\331\332\333\334\335\336\337" \
       "\340\341\342\343\344\345\346\347\350\351\352\353\354\355\356\357" \
       "\360\361\362\363\364\365\366\367\370\371\372\373\374\375"
+#define TEST_PATRAWA	"aA"
 
 struct nameserv {
 	struct sockaddr_storage addr;
@@ -53,10 +54,10 @@ struct client_instance {
 	struct frag_buffer *outbuf; /* outgoing and incoming window buffers */
 	struct frag_buffer *inbuf;
 	struct query_tuple *pending_queries;	/* query tracking data */
-	struct encoder *dataenc;	/* encoder struct for downstream data */
 	int autodetect_frag_size;
 	int hostname_maxlen;	/* maximum length of generated hostnames (incl. topdomain) */
 	int raw_mode;			/* enable raw UDP mode */
+	int use_edns0;			/* use EDNS0 extension for longer DNS packets */
 	int autodetect_server_timeout;
 	int autodetect_delay_variance;
 	int stats;		/* enable stats printout every # seconds */
@@ -69,7 +70,7 @@ struct client_instance {
 	size_t nameserv_addrs_count;
 	int current_nameserver;
 	struct sockaddr_storage raw_serv;
-	int raw_serv_len;
+	socklen_t raw_serv_len;
 
 	/* Remote TCP forwarding stuff (for -R) */
 	struct sockaddr_storage remote_forward_addr;
@@ -124,9 +125,11 @@ struct client_instance {
 	char userid;			/* My userid at the server */
 	char userid_char;		/* used when sending (lowercase) */
 
-	char downenc;			/* encoder type char to use for downstream data */
+	uint8_t enc_down;		/* encoder type ID to use for downstream data */
+	uint8_t enc_up;			/* encoder for upstream data */
 	int compression_up;		/* Upstream/downstream compression flags */
 	int compression_down;
+	unsigned max_retries;	/* number of times to resend fragments */
 	enum connection conn;	/* connection mode (NULL/RAW) */
 	time_t lastdownstreamtime;	/* timestamp of last received packet from server */
 };
@@ -145,16 +148,13 @@ enum connection client_get_conn();
 const char *client_get_raw_addr();
 
 void client_rotate_nameserver();
-int client_set_qtype(char *qtype);
-char *format_qtype();
-char parse_encoding(char *encoding);
 void client_set_hostname_maxlen(size_t i);
 
 int client_handshake();
 int client_tunnel();
 
 static int parse_data(uint8_t *data, size_t len, fragment *f, int *immediate, int*);
-static int handshake_waitdns(uint8_t *buf, size_t *buflen, char cmd, int timeout);
+static int handshake_waitdns(uint8_t *buf, size_t *buflen, size_t signedlen, char cmd, int timeout);
 static void handshake_switch_options(int lazy, int compression, char denc);
 static int send_ping(int ping_response, int ack, int timeout, int);
 

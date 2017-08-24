@@ -60,6 +60,7 @@ extern const unsigned char raw_header[RAW_HDR_LEN];
 #define C_BASE32	0x2	// 'T'
 #define C_BASE64U	0x3 // 'U'
 #define C_BASE128	0x4 // 'V'
+#define C_UNSET		0x8
 
 #define C_CHAR2NUM(c)	((toupper(c) - 'R') & 7)
 #define C_NUM2CHAR(n)	((n) & 7 + 'R')
