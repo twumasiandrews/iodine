@@ -53,7 +53,8 @@ iodine_SOURCES = $(COMMONSRC) src/iodine.c src/client.c	\
  src/client.h
 
 iodined_SOURCES = $(COMMONSRC) src/iodined.c src/server.c \
- src/server.h src/user.c src/fw_query.c src/fw_query.h src/user.h
+ src/server.h src/user.c src/fw_query.c src/fw_query.h src/user.h \
+ src/cache.c src/cache.h
 
 EXTRA_DIST += src/android_dns.h src/base128.h src/base32.h		\
  src/base64.h src/client.h src/common.h src/dns.h src/encoding.h	\
