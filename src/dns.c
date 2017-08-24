@@ -48,11 +48,14 @@
 #include "encoding.h"
 #include "read.h"
 
-int dnsc_use_edns0 = 1;
-
 void
 dns_packet_destroy(struct dns_packet *p)
 {
+	if (!p)
+		return;
+	if (p->refcount > 1) {
+		p->refcount--;
+	}
 	free(p->q);
 	free(p->an);
 	free(p);
@@ -64,6 +67,7 @@ dns_packet_create(uint16_t qdcount, uint16_t ancount, uint16_t nscount, uint16_t
 	struct dns_packet *p;
 	p = calloc(1, sizeof(struct dns_packet));
 	if (!p) return NULL;
+	p->refcount = 1;
 	p->qdcount = qdcount;
 	p->ancount = ancount;
 	if (qdcount) {
@@ -95,6 +99,64 @@ dns_packet_create(uint16_t qdcount, uint16_t ancount, uint16_t nscount, uint16_t
 		}
 	}
 	return p;
+}
+
+uint16_t
+get_qtype_from_name(char *qtype)
+{
+	if (!strcasecmp(qtype, "NULL"))
+		return T_NULL;
+	else if (!strcasecmp(qtype, "PRIVATE"))
+		return T_PRIVATE;
+	else if (!strcasecmp(qtype, "CNAME"))
+		return T_CNAME;
+	else if (!strcasecmp(qtype, "A"))
+		return T_A;
+	else if (!strcasecmp(qtype, "MX"))
+		return T_MX;
+	else if (!strcasecmp(qtype, "SRV"))
+		return T_SRV;
+	else if (!strcasecmp(qtype, "TXT"))
+		return T_TXT;
+	else if (!strcasecmp(qtype, "PTR"))
+		return T_PTR;
+	else if (!strcasecmp(qtype, "AAAA"))
+		return T_AAAA;
+	else if (!strcasecmp(qtype, "A6"))
+		return T_A6;
+	else if (!strcasecmp(qtype, "DNAME"))
+		return T_DNAME;
+	return T_UNSET;
+}
+
+char *
+get_qtype_name(uint16_t qtype)
+{
+	char *c = "UNDEFINED";
+
+	if (qtype == T_NULL)
+		c = "NULL";
+	else if (qtype == T_PRIVATE)
+		c = "PRIVATE";
+	else if (qtype == T_CNAME)
+		c = "CNAME";
+	else if (qtype == T_A)
+		c = "A";
+	else if (qtype == T_MX)
+		c = "MX";
+	else if (qtype == T_SRV)
+		c = "SRV";
+	else if (qtype == T_TXT)
+		c = "TXT";
+	else if (qtype == T_PTR)
+		c = "PTR";
+	else if (qtype == T_AAAA)
+		c = "AAAA";
+	else if (qtype == T_A6)
+		c = "A6";
+	else if (qtype == T_DNAME)
+		c = "DNAME";
+	return c;
 }
 
 #define CHECKLEN(x)	if (sizeof(qs->name) < (x) + p-qs->name) { \
@@ -246,7 +308,7 @@ dns_encode_rr(uint8_t *buf, uint8_t **dst, size_t buflen, struct dns_rr *a, uint
 #define CHECKLEN(x) if (*buflen < (x) + (unsigned)(p-buf))  return 0
 
 int
-dns_encode(uint8_t *buf, size_t *buflen, struct dns_packet *q)
+dns_encode(uint8_t *buf, size_t *buflen, struct dns_packet *q, int edns0)
 {
 	HEADER *header;
 	uint16_t ancount;
@@ -310,7 +372,7 @@ dns_encode(uint8_t *buf, size_t *buflen, struct dns_packet *q)
 
 		/* EDNS0 to advertise maximum response length
 		   (even CNAME/A/MX, 255+255+header would be >512) */
-		if (dnsc_use_edns0) {
+		if (edns0) {
 			header->arcount = htons(1);
 			CHECKLEN(11);
 			putbyte(&p, 0x00);    /* Root */

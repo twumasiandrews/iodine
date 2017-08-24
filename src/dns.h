@@ -73,6 +73,7 @@ struct dns_rr {
 };
 
 struct dns_packet {
+	size_t refcount; /* counter for references */
 	struct dns_question *q; /* array of QDCOUNT queries */
 	struct dns_rr *an; /* array of ANCOUNT answer RRs */
 	struct dns_rr *ns; /* array of NSCOUNT NS authority RRs */
@@ -89,14 +90,15 @@ struct dns_packet {
 
 #include "common.h"
 
-extern int dnsc_use_edns0;
-
 struct dns_packet *dns_packet_create(uint16_t qdcount, uint16_t ancount, uint16_t nscount, uint16_t arcount);
 void dns_packet_destroy(struct dns_packet *p);
 
+uint16_t get_qtype_from_name(char *qtype);
+char *get_qtype_name(uint16_t qtype);
+
 struct dns_packet *dns_encode_data_query(uint16_t qtype, uint8_t *td, uint8_t *data, size_t datalen);
 struct dns_packet *dns_encode_data_answer(struct dns_packet *q, uint8_t *data, size_t datalen);
-int dns_encode(uint8_t *buf, size_t *buflen, struct dns_packet *data);
+int dns_encode(uint8_t *buf, size_t *buflen, struct dns_packet *data, int edns0);
 size_t dns_encode_ns_response(uint8_t *buf, size_t buflen, struct dns_packet *q, uint8_t *topdomain);
 size_t dns_encode_a_response(uint8_t *buf, size_t buflen, struct dns_packet *q);
 
