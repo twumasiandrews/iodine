@@ -42,9 +42,9 @@
  * Memory = USERS * (sizeof(struct query_buffer) + sizeof(query) * QMEM_LEN) */
 #define QMEM_LEN 32
 
-#define USE_DNSCACHE
 /* QMEM entries contain additional space for DNS responses.
  * Undefine to disable. */
+#define USE_DNSCACHE
 
 /* Number of fragments in outgoing buffer.
  * Mem usage: USERS * (MAX_FRAGLEN * OUTFRAGBUF_LEN + sizeof(struct window_buffer)) */
@@ -112,41 +112,19 @@ typedef enum {
 	VERSION_FULL
 } version_ack_t;
 
-/* TODO use struct dns_answer in QMEM */
-struct query_answer {
-	uint8_t data[4096];
-	size_t len;
-};
-
-struct qmem_query {
-	struct query q;
-#ifdef USE_DNSCACHE
-	struct query_answer a;
-#endif
-};
-
-/* Struct used for QMEM + DNS cache */
-struct qmem_buffer {
-	struct qmem_query queries[QMEM_LEN];
-	size_t start_pending;	/* index of first "pending" query (ie. no response yet) */
-	size_t start;		/* index of first stored/pending query */
-	size_t end;			/* index of space after last stored/pending query */
-	size_t length;		/* number of stored queries */
-	size_t num_pending;	/* number of pending queries */
-};
-
 void server_init();
 void server_stop();
 int server_tunnel();
 
 static int raw_decode(uint8_t *packet, size_t len, struct pkt_metadata *q, int dns_fd);
 static int read_dns(int fd, struct dns_packet *q);
-static void write_dns(int fd, struct dns_packet *q, int userid, uint8_t *data, size_t datalen, uint8_t flags);
+static void send_dns(int fd, struct dns_packet *q);
+static struct dns_packet *write_dns(struct dns_packet *q, int userid, uint8_t *data, size_t datalen, uint8_t flags);
 static void handle_full_packet(int userid, uint8_t *data, size_t len, int);
-static void handle_null_request(int dns_fd, struct dns_packet *q, uint8_t *encdata, size_t encdatalen);
-static void handle_ns_request(int dns_fd, struct dns_packet *q);
+static struct dns_packet *handle_null_request(struct dns_packet *q, uint8_t *encdata, size_t encdatalen);
 static void handle_a_request(int dns_fd, struct dns_packet *q, int fakeip);
+static void handle_ns_request(int dns_fd, struct dns_packet *q);
 
-static void send_data_or_ping(int, struct dns_packet *, int, int, char*);
+static struct dns_packet *send_data_or_ping(int userid, struct dns_packet *q, int ping, int immediate, char *tcperror);
 
 #endif /* __SERVER_H__ */
