@@ -59,6 +59,8 @@ struct encoder {
 #define DDERR_IS_ANS	(1 << 8)
 extern int downstream_decode_err;
 
+uint8_t get_codec_from_name(char *encoding);
+
 size_t get_raw_length_from_dns(size_t enc_bytes, struct encoder *enc, const uint8_t *topdomain);
 size_t get_encoded_dns_length(size_t raw_bytes, struct encoder *enc, const uint8_t *topdomain);
 

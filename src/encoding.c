@@ -33,6 +33,17 @@
 #include "base64u.h"
 #include "base128.h"
 
+uint8_t
+get_codec_from_name(char *encoding)
+{
+	if (!strcasecmp(encoding, "base32")) return C_BASE32;
+	else if (!strcasecmp(encoding, "base64")) return C_BASE64;
+	else if (!strcasecmp(encoding, "base64u")) return C_BASE64U;
+	else if (!strcasecmp(encoding, "base128")) return C_BASE128;
+	else if (!strcasecmp(encoding, "raw")) return C_RAW;
+	else return C_UNSET;
+}
+
 size_t
 get_raw_length_from_dns(size_t dns_hostlen, struct encoder *enc, const uint8_t *topdomain)
 /* Returns the maximum length of raw data that can be encoded into enc_bytes */
@@ -314,7 +325,7 @@ downstream_decode(uint8_t *out, size_t *outlen, uint8_t *encdata, size_t encdata
 	if (hmac_key) {
 		p = hmacbuf;
 		putlong(&p, len); /* 4 bytes length */
-		hmacbuf[4] = encdata[4]; /* encoded flags byte */
+		hmacbuf[4] = encdata[0]; /* encoded flags byte */
 		memcpy(hmac_pkt, hmacbuf + 9, hmaclen); /* copy packet HMAC */
 		memset(hmacbuf + 9, 0, hmaclen); /* clear HMAC field */
 		hmac_md5(hmac, hmac_key, 16, hmacbuf, len + 4); /* calculate HMAC */
@@ -328,10 +339,10 @@ downstream_decode(uint8_t *out, size_t *outlen, uint8_t *encdata, size_t encdata
 	if (*outlen < len - 4 - hmaclen) {
 		goto _dderr;
 	}
-	memcpy(out, hmacbuf + 9 + hmaclen, len - 4 - hmaclen);
-	*outlen = len - 4 - hmaclen;
 
 	if (!(flags & DH_ERROR)) {
+		memcpy(out, hmacbuf + 9 + hmaclen, len - 4 - hmaclen);
+		*outlen = len - 4 - hmaclen;
 		return 1;
 	} else {
 		downstream_decode_err = error | DDERR_IS_ANS;
