@@ -125,6 +125,6 @@ static struct dns_packet *handle_null_request(struct dns_packet *q, uint8_t *enc
 static void handle_a_request(int dns_fd, struct dns_packet *q, int fakeip);
 static void handle_ns_request(int dns_fd, struct dns_packet *q);
 
-static struct dns_packet *send_data_or_ping(int userid, struct dns_packet *q, int ping, int immediate, char *tcperror);
+static struct dns_packet *send_data_or_ping(int userid, struct dns_packet *q, int ping, int immediate);
 
 #endif /* __SERVER_H__ */
