@@ -113,20 +113,37 @@ AC_SEARCH_LIBS([uncompress], [z])
 
 # Enable systemd per option by setting HAVE_SYSTEMD
 
-AS_CASE([${enable_systemd}],
-  [yes|check],
-    [AC_MSG_CHECKING([systemd])
-     AC_SEARCH_LIBS([sd_listen_fds], [systemd-daemon])
-     AC_CHECK_FUNC([sd_listen_fds],
-       [AC_MSG_RESULT([enabled: systemd])
-        AC_DEFINE([HAVE_SYSTEMD],[1],
-          [Define to 1 to enable systemd support])],
-       AS_CASE([${enable_systemd}],
-         [yes],
-           AC_MSG_ERROR([systemd support not available]),
-	 AC_MSG_RESULT([disabled: systemd])))],
-  [no],,
-  [AC_MSG_ERROR([invalid argument, --enable-systemd=${enable_systemd}])])
+# Disable systemd socket activation support
+AC_MSG_CHECKING([whether to enable systemd socket activation support])
+AC_ARG_ENABLE(systemd,
+[  --disable-systemd       disable systemd socket activation support],
+    [
+        AS_CASE(["$enableval"], 
+            [yes|check], [AC_MSG_RESULT([yes])
+                 AC_SEARCH_LIBS([sd_listen_fds], [systemd systemd-daemon])
+                 AC_DEFINE([USE_SYSTEMD], [1],
+                     [Define to 1 to enable systemd socket activation])],
+            [no],  [AC_MSG_RESULT([no])],
+            [*], [AC_MSG_RESULT([error])
+                 AC_MSG_ERROR([Bad value \"${enableval}\"])]
+        )
+    ],
+    [
+        AC_MSG_RESULT([autodetecting])
+        # the library name has changed to -lsystemd in systemd 209
+        AC_SEARCH_LIBS([sd_listen_fds], [systemd systemd-daemon],
+            [ AC_CHECK_HEADERS([systemd/sd-daemon.h], [
+                AC_DEFINE([USE_SYSTEMD], [1],
+                    [Define to 1 to enable systemd socket activation])
+                AC_MSG_NOTICE([systemd support enabled])
+            ], [
+                AC_MSG_NOTICE([systemd header not found])
+            ]) ], [
+                AC_MSG_NOTICE([systemd library not found])
+            ])
+    ]
+)
+
 
 # Enable selinux per option by setting HAVE_SETCON
 
