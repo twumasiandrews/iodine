@@ -455,7 +455,7 @@ main(int argc, char **argv)
 		/* NOTREACHED */
 	} else {
 		uint8_t *p = server.topdomain;
-		putname(&p, sizeof(server.topdomain), topdomain, strlen(topdomain), 0);
+		putname(&p, sizeof(server.topdomain), (uint8_t *) topdomain, strlen(topdomain), 0);
 	}
 
 	if (username != NULL) {
