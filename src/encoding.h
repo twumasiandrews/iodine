@@ -70,6 +70,7 @@ size_t inline_undotify(uint8_t *, size_t);
 struct encoder *get_encoder(uint8_t codec);
 size_t encode_data(uint8_t *, size_t, uint8_t *, size_t, uint8_t);
 size_t unpack_data(uint8_t *, size_t, uint8_t *, size_t, uint8_t);
+void print_downstream_err();
 int downstream_encode(uint8_t *, size_t *, uint8_t *, size_t , uint8_t *hmac_key, uint8_t flags, uint32_t cmc);
 int downstream_decode(uint8_t *out, size_t *outlen, uint8_t *encdata, size_t encdatalen, uint8_t *hmac_key);
 

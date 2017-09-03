@@ -277,6 +277,34 @@ downstream_encode(uint8_t *out, size_t *outlen, uint8_t *data, size_t datalen,
 
 int downstream_decode_err;
 
+void
+print_downstream_err()
+{
+	DEBUG(1, "downstream decode error %02x", downstream_decode_err);
+	if (downstream_decode_err & DDERR_BADHMAC) {
+		fprintf(stderr, "server reply has bad HMAC!");
+	} else if (downstream_decode_err & DDERR_TOOSHORT) {
+		fprintf(stderr, "server reply was too short!");
+	} else if (downstream_decode_err & DDERR_IS_ANS) {
+		char *s = "unknown";
+		switch (downstream_decode_err & 7) {
+		case E_BADAUTH:
+			s = "bad authentication (session likely expired due to inactivity)";
+			break;
+		case E_BADLEN:
+			s = "bad length (query likely truncated)";
+			break;
+		case E_BADLOGIN:
+			s = "bad login (is password correct?)";
+			break;
+		case E_BADOPTS:
+			s = "bad server options (try setting manually)";
+			break;
+		}
+		fprintf(stderr, "got error from server: %s (%d)", s, downstream_decode_err & 7);
+	}
+}
+
 int
 downstream_decode(uint8_t *out, size_t *outlen, uint8_t *encdata, size_t encdatalen, uint8_t *hmac_key)
 /* validate downstream header + HMAC, decode data
