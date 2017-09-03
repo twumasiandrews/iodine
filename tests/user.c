@@ -29,6 +29,7 @@
 
 #include "common.h"
 #include "encoding.h"
+#include "cache.h"
 #include "user.h"
 #include "test.h"
 

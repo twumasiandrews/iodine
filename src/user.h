@@ -19,10 +19,13 @@
 #ifndef __USER_H__
 #define __USER_H__
 
-#include "window.h"
-#include "server.h"
-
 #define USERS 16
+
+enum user_conn_type {
+	USER_CONN_NONE,
+	USER_CONN_TUNIP,
+	USER_CONN_UDPFORWARD,
+};
 
 struct tun_user {
 	uint8_t server_chall[16];
@@ -32,7 +35,7 @@ struct tun_user {
 	struct sockaddr_storage remoteforward_addr;
 	struct frag_buffer *incoming;
 	struct frag_buffer *outgoing;
-	struct qmem_buffer qmem; // TODO dynamic allocation
+	struct qmem_buffer *qmem; // TODO dynamic allocation
 	size_t fragsize;
 	socklen_t hostlen;
 	socklen_t remoteforward_addr_len; /* 0 if no remote forwarding enabled */
@@ -40,10 +43,10 @@ struct tun_user {
 	in_addr_t tun_ip;
 	uint32_t cmc_up;
 	uint32_t cmc_down;
-	int remote_tcp_fd;
+	int remote_udp_fd;
 	int remote_forward_connected; /* 0 if not connected, -1 if error or 1 if OK */
-	int next_upstream_ack;
 	enum connection conn;
+	enum user_conn_type tuntype;
 	char use_hmac;
 	char lazy;
 	char id;
@@ -62,7 +65,7 @@ int user_sending(int user);
 int all_users_waiting_to_send();
 int user_active(int i);
 int is_valid_user(int userid);
-
+void user_reset(int userid);
 int init_users(in_addr_t, int);
 const char* users_get_first_ip();
 int find_user_by_ip(uint32_t);

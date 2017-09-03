@@ -37,6 +37,7 @@
 
 #include "common.h"
 #include "encoding.h"
+#include "server.h"
 #include "user.h"
 #include "window.h"
 
@@ -82,13 +83,45 @@ init_users(in_addr_t my_ip, int netbits)
 		}
 		users[i].tun_ip = ip;
 		net.s_addr = ip;
-
-		users[i].incoming = window_buffer_init(INFRAGBUF_LEN, 10, MAX_FRAGSIZE, WINDOW_RECVING);
-		users[i].outgoing = window_buffer_init(OUTFRAGBUF_LEN, 10, 100, WINDOW_SENDING);
- 		/* Rest is reset on login ('V' packet) or already 0 */
 	}
 
 	return usercount;
+}
+
+void
+user_reset(int userid)
+{
+	struct tun_user *u = &users[userid];
+	/* reset all stats */
+	u->hostlen = 0;
+	u->active = 1;
+	u->authenticated = 0;
+	u->authenticated_raw = 0;
+	u->use_hmac = 0;
+	u->last_pkt = time(NULL);
+	u->fragsize = MAX_FRAGSIZE;
+	u->conn = CONN_DNS_NULL;
+	u->remote_forward_connected = 0;
+	u->remoteforward_addr_len = 0;
+	u->remote_udp_fd = -1;
+	u->remoteforward_addr.ss_family = AF_UNSPEC;
+	u->fragsize = 150; /* very safe */
+	u->conn = CONN_DNS_NULL;
+	u->tuntype = USER_CONN_NONE;
+	u->down_compression = 1;
+	u->lazy = 0;
+	u->cmc_down = rand();
+	u->upenc = C_BASE32;
+	u->downenc = C_BASE32;
+	u->dns_timeout.tv_sec = 1; /* 1 second default lazymode timeout */
+	u->dns_timeout.tv_usec = 0;
+	get_rand_bytes(u->server_chall, sizeof(u->server_chall));
+	window_buffer_destroy(u->outgoing); /* window buffers allocated later */
+	window_buffer_destroy(u->incoming);
+	u->outgoing = NULL;
+	u->incoming = NULL;
+	qmem_destroy(u->qmem);
+	u->qmem = qmem_init(QMEM_LEN);
 }
 
 const char*
@@ -148,18 +181,11 @@ all_users_waiting_to_send()
 int
 find_available_user()
 {
-	for (int u = 0; u < usercount; u++) {
+	for (int id = 0; id < usercount; id++) {
 		/* Not used at all or not used in one minute */
-		if (!user_active(u)) {
-			struct tun_user *user = &users[u];
-			/* reset all stats */
-			user->active = 1;
-			user->authenticated = 0;
-			user->authenticated_raw = 0;
-			user->last_pkt = time(NULL);
-			user->fragsize = MAX_FRAGSIZE;
-			user->conn = CONN_DNS_NULL;
-			return u;
+		if (!user_active(id)) {
+			user_reset(id);
+			return id;
 		}
 	}
 	return -1;
@@ -212,8 +238,8 @@ set_user_tcp_fds(fd_set *fds, int conn_status)
 	for (int userid = 0; userid < created_users; userid ++) {
 		if (user_active(userid) && users[userid].remoteforward_addr_len > 0
 			&& users[userid].remote_forward_connected == conn_status) {
-			FD_SET(users[userid].remote_tcp_fd, fds);
-			max_fd = MAX(max_fd, users[userid].remote_tcp_fd);
+			FD_SET(users[userid].remote_udp_fd, fds);
+			max_fd = MAX(max_fd, users[userid].remote_udp_fd);
 		}
 	}
 	return max_fd;
