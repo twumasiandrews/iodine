@@ -280,13 +280,12 @@ int downstream_decode_err;
 void
 print_downstream_err()
 {
-	DEBUG(1, "downstream decode error %02x", downstream_decode_err);
+	char *s = "unknown";
 	if (downstream_decode_err & DDERR_BADHMAC) {
-		fprintf(stderr, "server reply has bad HMAC!");
+		s = "server reply has bad HMAC!";
 	} else if (downstream_decode_err & DDERR_TOOSHORT) {
-		fprintf(stderr, "server reply was too short!");
+		s = "server reply was too short!";
 	} else if (downstream_decode_err & DDERR_IS_ANS) {
-		char *s = "unknown";
 		switch (downstream_decode_err & 7) {
 		case E_BADAUTH:
 			s = "bad authentication (session likely expired due to inactivity)";
@@ -301,8 +300,9 @@ print_downstream_err()
 			s = "bad server options (try setting manually)";
 			break;
 		}
-		fprintf(stderr, "got error from server: %s (%d)", s, downstream_decode_err & 7);
 	}
+	fprintf(stderr, "%s (%d (0x%02x))\n", s,
+			downstream_decode_err & 7, downstream_decode_err);
 }
 
 int
@@ -325,7 +325,7 @@ downstream_decode(uint8_t *out, size_t *outlen, uint8_t *encdata, size_t encdata
 	hmaclen = flags & DH_HMAC32 ? 4 : 12;
 
 	if (flags & DH_ERROR) {
-		DEBUG(1, "got DH_ERROR from server! code=%x", flags & 7);
+		DEBUG(1, "got DH_ERROR from server! code=%x (len=%" L "u)", flags & 7, encdatalen);
 		/* always 96-bit HMAC when error flag is set */
 		error = flags & 7;
 		if (hmaclen == 4) {

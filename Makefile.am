@@ -91,7 +91,7 @@ noinst_PROGRAMS = test-iodine
 test_iodine_SOURCES = tests/test.c tests/base32.c tests/base64.c	\
  tests/common.c tests/read.c tests/dns.c tests/encoding.c		\
  tests/login.c tests/user.c tests/fw_query.c tests/window.c tests/hmac.c $(COMMONSRC0)	\
- src/user.c src/fw_query.c
+ src/user.c src/fw_query.c src/cache.c
 
 EXTRA_DIST += tests/test.h
 

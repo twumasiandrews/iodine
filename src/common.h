@@ -229,6 +229,9 @@ void read_password(char*, size_t);
 
 int check_topdomain(char *, char **);
 
+int socket_set_blocking(int fd, int blocking);
+
+
 extern double difftime(time_t, time_t);
 
 #if defined(WINDOWS32) || defined(ANDROID)

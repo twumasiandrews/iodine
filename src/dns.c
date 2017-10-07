@@ -198,10 +198,9 @@ dns_encode_data_query(uint16_t qtype, uint8_t *td, uint8_t *data, size_t datalen
 
 struct dns_packet *
 dns_encode_data_answer(struct dns_packet *qu, uint8_t *data, size_t datalen)
-/* encodes (possibly binary) data into query q using whichever
+/* encodes (possibly binary) data into new struct dns_packet using whichever
  * RR types are applicable to the question type
- * returns 0 on failure, 1 on success
- * note: q is modified */
+ * returns 0 on failure, 1 on success */
 {
 	if (qu->qdcount == 0 || qu->qr != QR_QUERY) {
 		/* we need a question */
@@ -277,6 +276,10 @@ dns_encode_data_answer(struct dns_packet *qu, uint8_t *data, size_t datalen)
 		memcpy(q->an[0].rdata, data, datalen);
 		q->an[0].rdlength = datalen;
 	}
+
+	/* copy question source address to answer dest addr */
+	q->m.destlen = qu->m.fromlen;
+	memcpy(&q->m.dest, &qu->m.from, qu->m.fromlen);
 	return q;
 }
 #undef CHECKLEN

@@ -335,8 +335,7 @@ parse_tcp_forward_option(char *optstr)
 	} else {
 		/* no address specified (use server localhost IPv4), optstr is port */
 		remote_port_str = optstr;
-		this.remote_forward_addr.ss_family = AF_INET;
-		((struct sockaddr_in *) &this.remote_forward_addr)->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+		this.remote_forward_addr.ss_family = AF_UNSPEC;
 		retval = 1;
 	}
 
@@ -355,12 +354,12 @@ parse_tcp_forward_option(char *optstr)
 		/* not reached */
 	}
 
-	if (this.remote_forward_addr.ss_family == AF_INET) {
-		/* set port as sockaddr_in (IPv4) */
-		((struct sockaddr_in *) &this.remote_forward_addr)->sin_port = htons(port);
-	} else {
+	if (this.remote_forward_addr.ss_family == AF_INET6) {
 		/* set port in IPv6 sockaddr */
 		((struct sockaddr_in6 *) &this.remote_forward_addr)->sin6_port = htons(port);
+	} else {
+		/* set port as sockaddr_in (IPv4); includes for local port */
+		((struct sockaddr_in *) &this.remote_forward_addr)->sin_port = htons(port);
 	}
 	return port;
 }
@@ -634,8 +633,6 @@ main(int argc, char **argv)
 		foreground = 1;
 	}
 
-
-
 	this.nameserv_hosts_len = argc - 1;
 	if (this.nameserv_hosts_len <= 0)
 		/* if no hosts specified, use resolv.conf */
@@ -688,7 +685,7 @@ main(int argc, char **argv)
 		/* NOTREACHED */
 	} else {
 		uint8_t *p = this.topdomain;
-		putname(&p, sizeof(this.topdomain), topdomain, strlen(topdomain), 0);
+		putname(&p, sizeof(this.topdomain), (uint8_t *) topdomain, strlen(topdomain), 0);
 	}
 
 	int max_ws = MAX_SEQ_ID / 2;
@@ -749,7 +746,7 @@ main(int argc, char **argv)
 	}
 	/* hash password */
 	md5_init(&md);
-	md5_append(&md, password, strlen(password));
+	md5_append(&md, (uint8_t *) password, strlen(password));
 	md5_finish(&md, this.passwordmd5);
 
 	memset(password, 0, strlen(password));
