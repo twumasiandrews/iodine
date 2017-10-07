@@ -36,6 +36,7 @@
 
 #include "common.h"
 #include "dns.h"
+#include "read.h"
 #include "encoding.h"
 #include "base32.h"
 #include "test.h"
@@ -65,7 +66,7 @@ static uint8_t answer_packet_high_trans_id[] =
 	"\x69\x73\x20\x74\x68\x65\x20\x6D\x65\x73\x73\x61\x67\x65\x20\x74\x6F"
 	"\x20\x62\x65\x20\x64\x65\x6C\x69\x76\x65\x72\x65\x64";
 static uint8_t msgData[] = "this is the message to be delivered";
-static char *topdomain = "kryo.se";
+static uint8_t topdomain[] = "\x04kryo\x02se\x00";
 
 static uint8_t innerData[] = "HELLO this is the test data";
 
@@ -87,7 +88,7 @@ START_TEST(test_encode_query)
 
 	q = dns_encode_data_query(T_NULL, topdomain, resolv, len);
 	len = sizeof(buf);
-	ret = dns_encode(buf, &len, q);
+	ret = dns_encode(buf, &len, q, 1);
 	fail_if(len != sizeof(query_packet) - 1); /* Skip extra null character */
 
 	if (memcmp(query_packet, buf, len) != 0 || len != sizeof(query_packet) - 1) {
@@ -113,11 +114,10 @@ START_TEST(test_decode_query)
 	fail_if((q = dns_decode(query_packet, len)) == NULL);
 	fail_if(q->qr != QR_QUERY);
 	len = sizeof(buf);
-	// TODO unencode data
+	fail_unless(dns_decode_data_query(q, topdomain, buf, &len), "decode failed!");
 
-
-	fail_unless(strncmp(buf, innerData, strlen(innerData)) == 0, "Did not extract expected host: '%s'", buf);
-	fail_unless(strlen(buf) == strlen(innerData), "Bad host length: %d, expected %d: '%s'", strlen(buf), strlen(innerData), buf);
+	fail_unless(memcmp(buf, innerData, sizeof(innerData) - 1) == 0, "Did not extract expected host");
+	fail_unless(len == sizeof(innerData) - 1, "Bad host length: %" L "u, expected %u", len, sizeof(innerData) - 1);
 }
 END_TEST
 
@@ -125,21 +125,20 @@ START_TEST(test_encode_response)
 {
 	uint8_t buf[512], *p;
 	uint8_t host[] = "silly.host.of.iodine.code.kryo.se";
-	struct dns_packet *q;
+	struct dns_packet *q, *ans;
 	size_t len;
 	int ret;
 
-	len = sizeof(buf);
-	memset(buf, 0, sizeof(buf));
-
-	// TODO test with dns_encode_data_answer
 	fail_if((q = dns_packet_create(1, 1, 0, 0)) == NULL);
 	q->id = 1337;
 	q->q[0].type = T_NULL;
 	p = q->q[0].name;
 	putname(&p, 255, host, sizeof(host) - 1, 0);
 
-	ret = dns_encode(buf, &len, q);
+	fail_if((ans = dns_encode_data_answer(q, msgData, sizeof(msgData) - 1)) == NULL);
+
+	len = sizeof(buf);
+	ret = dns_encode(buf, &len, q, 0);
 
 	fail_unless(memcmp(answer_packet, buf, sizeof(answer_packet) - 1) == 0, "Did not compile expected packet");
 	fail_unless(len == sizeof(buf), "Bad packet length: %d, expected %d", len, sizeof(buf));
@@ -151,16 +150,14 @@ START_TEST(test_decode_response)
 	uint8_t buf[512];
 	struct dns_packet *q;
 	size_t len;
-	int ret;
-
-	len = sizeof(buf);
-	memset(&buf, 0, sizeof(buf));
 
 	fail_if((q = dns_decode(answer_packet, sizeof(answer_packet) - 1)) == NULL);
 
-//	fail_if(ret = dns_decode_query())
-	fail_unless(ret == strlen(msgData), "Bad data length: %d, expected %d", ret, strlen(msgData));
-	fail_unless(strncmp(msgData, buf, strlen(msgData)) == 0, "Did not extract expected data");
+	len = sizeof(buf);
+	fail_unless(dns_decode_data_answer(q, buf, &len));
+
+	fail_unless(len == sizeof(msgData) - 1, "Bad data length: %" L "u, expected %u", len, sizeof(msgData) - 1);
+	fail_unless(memcmp(msgData, buf, sizeof(msgData) - 1) == 0, "Did not extract expected data");
 	fail_unless(q->id == 0x0539);
 }
 END_TEST
@@ -170,16 +167,15 @@ START_TEST(test_decode_response_with_high_trans_id)
 	uint8_t buf[512];
 	struct dns_packet *q;
 	size_t len;
-	int ret;
 
 	memset(&buf, 0, sizeof(buf));
 
 	fail_if((q = dns_decode(answer_packet_high_trans_id, sizeof(answer_packet_high_trans_id) - 1)) == NULL);
 
 	len = sizeof(buf);
-	fail_unless(dns_decode_data_query(q, topdomain, buf, &len));
+	fail_unless(dns_decode_data_answer(q, buf, &len));
 
-	fail_unless(len == sizeof(msgData) - 1, "Bad data length: %u, expected %u", ret, sizeof(msgData) - 1);
+	fail_unless(len == sizeof(msgData) - 1, "Bad data length: %" L "u, expected %u", len, sizeof(msgData) - 1);
 	fail_unless(memcmp(msgData, buf, sizeof(msgData) - 1) == 0, "Did not extract expected data");
 	fail_unless(q->id == 0x8539, "q.id was %08X instead of %08X!", q->id, 0x8539);
 }
@@ -187,8 +183,8 @@ END_TEST
 
 START_TEST(test_get_id_short_packet)
 {
-	char buf[5];
-	int len;
+	uint8_t buf[5];
+	size_t len;
 	unsigned short id;
 
 	len = sizeof(buf);

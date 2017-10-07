@@ -44,17 +44,17 @@ START_TEST(test_read_putshort)
 {
 	unsigned short k;
 	unsigned short l;
-	uint8_t* p;
+	uint8_t *p;
 	size_t i;
 
 	for (i = 0; i < 65536; i++) {
-		p = &k;
+		p = (uint8_t *) &k;
 		putshort(&p, i);
 		fail_unless(ntohs(k) == i,
 				"Bad value on putshort for %d: %d != %d",
 					i, ntohs(k), i);
 
-		p = &k;
+		p = (uint8_t *) &k;
 		readshort(NULL, &p, &l);
 		fail_unless(l == i,
 				"Bad value on readshort for %d: %d != %d",
