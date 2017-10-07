@@ -179,8 +179,8 @@ Command O: Set options (len 3)
     2 bytes downstream fragsize
 Server sends (len 3):
 	BADOPTS if options rejected. Previous situation remains.
-	1 byte = flag byte sent by client if all options accepted
-	2 bytes = accepted downstream fragsize
+	1 byte flag byte sent by client if all options accepted
+	2 bytes accepted downstream fragsize
 Option flags:
 	L:	Lazy mode enabled, server will keep a number of requests waiting until
 		data becomes available to send downstream or the requests time out.
@@ -213,18 +213,29 @@ Upstream data (len 1+(9-17)+1+data):
     1 byte packet sequence ID
 
 Downstream data header (len 2+data):
-	1 byte sequence ID
-	1 byte flags
-	                  |=> only if ping (P) flag set       |
-    0        1        3        4        5        6        7
-    +--------+76543210+--------+--------+--------+--------+
-    | Seq ID |00IP0KFL|Dn Wsize|Up Wsize|DnWstart|UpWstart| (+ data...)
-    +--------+--------+--------+--------+--------+--------+
+	1 byte flags:
+    +76543210+
+    |P000IKFL|
+    +--------+
+    1 byte sequence ID
+    data
+
+Downstream ping reply (len 11):
+	1 byte flags:
+    +76543210+
+    |P000000I|
+    +--------+
+    4 bytes current server upstream CMC
+    2 bytes downstream windowsize
+    2 bytes upstream windowsize
+    1 byte downstream window start sequence ID
+    1 byte upstream window start sequence ID
+    
 
 Flags and fields:
 	U = Upstream codec check, data is to be discarded.
 	I = responded to immediately (for RTT calculation) - downstream only
-	P = ping flag: extra header present - downstream only
+	P = ping flag: extra header present - downstream only; data field is absent
 	H = 1: 32-bit HMAC, 0: 96-bit HMAC (upstream only)
 	K = Compression enabled
 	F = First fragment flag
@@ -319,11 +330,11 @@ NULL/PRIVATE response type:
 	Encoded data is pasted as-is into RDATA field.
 
 Codec field values:
-	0x2: base32   (a-z0-5)
+	0x0: raw      (\000-\377)
 	0x1: base64   (a-zA-Z0-9+-)
+	0x2: base32   (a-z0-5)
 	0x3: base64u  (a-zA-Z0-9_-)
 	0x4: base128  (a-zA-Z0-9\274-\375)
-	0x0: raw      (\000-\377)
 Error codes:
 	0x0: BADLEN (packet below minimum length, maybe truncated)
 	0x1: BADAUTH (invalid authentication/HMAC/CMC)
