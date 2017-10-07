@@ -62,7 +62,7 @@ struct client_instance {
 	int autodetect_delay_variance;
 	int stats;		/* enable stats printout every # seconds */
 	int running;	/* always == 1 unless shutting down */
-	int connected;	/* connection is established after login successful */
+	int connected;	/* using desired tunnel mode + ready to send data */
 	int lazymode;	/* lazymode enabled */
 
 	/* DNS nameserver info */
@@ -72,10 +72,9 @@ struct client_instance {
 	struct sockaddr_storage raw_serv;
 	socklen_t raw_serv_len;
 
-	/* Remote TCP forwarding stuff (for -R) */
+	/* Remote UDP forwarding stuff (for -R) */
 	struct sockaddr_storage remote_forward_addr;
 	int use_remote_forward; /* 0 if no forwarding used */
-	int remote_forward_connected;
 
 	int tun_fd;		/* file descriptor of tunnel interface */
 	int dns_fd;		/* file descriptor of DNS UDP socket */
@@ -155,7 +154,7 @@ int client_tunnel();
 
 static int parse_data(uint8_t *data, size_t len, fragment *f, int *immediate, int*);
 static int handshake_waitdns(uint8_t *buf, size_t *buflen, size_t signedlen, char cmd, int timeout);
-static void handshake_switch_options(int lazy, int compression, char denc);
+static int handshake_switch_options(int lazy, int compression, uint8_t dnenc, uint8_t upenc, uint16_t dnfraglen);
 static int send_ping(int ping_response, int ack, int timeout, int);
 
 #endif

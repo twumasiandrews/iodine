@@ -599,7 +599,8 @@ handle_data_servfail()
 		/* last-ditch attempt to fix SERVFAILs - disable lazy mode */
 		immediate_mode_defaults();
 		fprintf(stderr, "Attempting to disable lazy mode due to excessive SERVFAILs\n");
-		handshake_switch_options(0, this.compression_down, this.enc_down);
+		handshake_switch_options(0, this.compression_down, this.enc_down,
+				this.enc_up, this.maxfragsize_down);
 	}
 }
 
@@ -647,12 +648,12 @@ handshake_waitdns(uint8_t *buf, size_t *buflen, size_t signedlen, char cmd, int 
    *buflen is set to length of reply data = #bytes used in buf
    signedlen = length of b32 data that is signed by HMAC (0 if full reply signed)
    Returns 1 on success
-   Returns 0 on downstream decode error
+   Returns 0 on valid error code from server
    Returns -1 on syscall errors.
    Returns -2 on (at least) DNS error that fits to our latest query,
    error message already printed.
    Returns -3 on timeout (given in seconds).
-   Returns -4 on valid error reply from server (BADLEN, BADAUTH, BADLOGIN etc)
+   Returns -4 on downstream decoding error
 
    Timeout is restarted when "wrong" (previous/delayed) replies are received,
    so effective timeout may be longer than specified.
@@ -733,29 +734,22 @@ handshake_waitdns(uint8_t *buf, size_t *buflen, size_t signedlen, char cmd, int 
 		} /* if still here: reply matches our latest query */
 
 		if (signedlen && ansdatalen >= signedlen) {
+			/* only a the base32-encoded header of (signedlen) bytes (encoded length)
+			 * is signed by the HMAC, rest of data is not to be decoded. */
 			size_t hdrlen = *buflen;
 			r = downstream_decode(buf, &hdrlen, ansdata, signedlen, this.hmac_key);
 			if (r && hdrlen + ansdatalen - signedlen <= *buflen) {
 				memcpy(buf + hdrlen, ansdata + signedlen, ansdatalen - signedlen);
 				*buflen = hdrlen + ansdatalen - signedlen;
+				return 1;
 			} else {
+				if (debug > 4)
+					print_downstream_err();
 				return 0;
 			}
-		} else {
-			if ((r = downstream_decode(buf, buflen, ansdata, ansdatalen,
-				this.connected ? this.hmac_key : NULL))) {
-				return 1;
-			} else { /* print downstream decode error */
-				DEBUG(1, "downstream decode error %02x", downstream_decode_err);
-				if (downstream_decode_err & DDERR_BADHMAC) {
-					fprintf(stderr, "server reply has bad HMAC!");
-				} else if (downstream_decode_err & DDERR_TOOSHORT) {
-					fprintf(stderr, "server reply was too short!");
-				} else if (downstream_decode_err & DDERR_IS_ANS) {
-					return -4; /* iodine server didn't like our query */
-				}
-			}
-
+		} else { /* normal downstream decode */
+			return downstream_decode(buf, buflen, ansdata, ansdatalen,
+					this.connected ? this.hmac_key : NULL);
 		}
 	}
 
@@ -1272,9 +1266,11 @@ static void
 send_codectest(uint8_t *dataq, uint8_t dqlen, uint16_t drlen, int dnchk)
 /* dnchk == 1: downstream codec check; dnchk == 0: upstream */
 {
-	uint8_t buf[34 + dqlen], hmac[16], header[4 + 20], *p, *hp;
+	uint8_t buf[34 + dqlen], hmac[16], header[4 + 2 + 20], *p, *hp;
 	p = header;
-	putlong(&p, 20); /* HMAC-only length field */
+	putlong(&p, 22); /* HMAC-only length field */
+	*p++ = buf[0] = 'u';
+	*p++ = buf[1] = this.userid_char;
 	putlong(&p, CMC(this.cmc_up));
 	memset((hp = p), 0, 12); /* clear HMAC field */
 	putbyte(&p, (dnchk & 1)); /* 1 byte flags */
@@ -1283,8 +1279,6 @@ send_codectest(uint8_t *dataq, uint8_t dqlen, uint16_t drlen, int dnchk)
 	hmac_md5(hmac, this.hmac_key, 16, header, sizeof(header));
 	memcpy(header + 8, hmac, 12);
 
-	buf[0] = 'u';
-	buf[1] = this.userid_char;
 	size_t buflen = 32;
 	if (b32->encode(buf + 2, &buflen, header + 4, 20) != 32)
 		DEBUG(1, "upenctest got wrong encoded headerlen!");
@@ -1310,67 +1304,49 @@ send_raw_udp_login()
 }
 
 static void
-send_server_options(int lazy, int compression, char denc)
+send_server_options(int lazy, int compression, uint8_t dnenc, uint8_t upenc, uint16_t dnfraglen)
 {
-	uint8_t optflags = 0;
+	uint8_t buf[3], *p = buf;
 
-	if (denc == 'T') /* Base32 */
-		optflags |= 1 << 6;
-	else if (denc == 'S') /* Base64 */
-		optflags |= 1 << 5;
-	else if (denc == 'U') /* Base64u */
-		optflags |= 1 << 4;
-	else if (denc == 'V') /* Base128 */
-		optflags |= 1 << 3;
-	else if (denc == 'R') /* Raw */
-		optflags |= 1 << 2;
+	/* flags byte: see docs/proto_xxx.txt */
+	putbyte(&p, ((lazy & 1) << 7) | ((compression & 1) << 6) |
+			((upenc & 7) << 3) | (dnenc & 7));
+	putshort(&p, dnfraglen);
 
-	optflags |= (compression & 1) << 1;
-	optflags |= lazy & 1;
-
-	// TODO UDP forwarding in options command
-	//	/* if remote forward address is specified and not currently connecting */
-	//	if (this.remote_forward_connected != 2 &&
-	//		this.remote_forward_addr.ss_family != AF_UNSPEC) {
-	//		struct sockaddr_in6 *s6 = (struct sockaddr_in6 *) &this.remote_forward_addr;
-	//		struct sockaddr_in *s = (struct sockaddr_in *) &this.remote_forward_addr;
-	//
-	//		port = (this.remote_forward_addr.ss_family == AF_INET ? s->sin_port : s6->sin6_port);
-	//
-	//		*(uint16_t *) (data + length) = port;
-	//
-	//		flags |= 1;
-	//		length += 2;
-	//		/* set remote IP to be non-localhost if this.remote_forward_addr set */
-	//		if (this.remote_forward_addr.ss_family == AF_INET && s->sin_addr.s_addr != INADDR_LOOPBACK) {
-	//			if (this.remote_forward_addr.ss_family == AF_INET6) { /* IPv6 address */
-	//				addrlen = sizeof(s6);
-	//				flags |= 4;
-	//				memcpy(data + length, &s6->sin6_addr, addrlen);
-	//			} else { /* IPv4 address */
-	//				flags |= 2;
-	//				addrlen = sizeof(s);
-	//				memcpy(data + length, &s->sin_addr, addrlen);
-	//			}
-	//
-	//			length += addrlen;
-	//		}
-	//		DEBUG(2, "Sending TCP forward login request: port %hu, length %d, addrlen %d",
-	//			  port, length, addrlen);
-	//	} else if (this.remote_forward_connected == 2) {
-	//		/* remote TCP forward connection in progress */
-	//		DEBUG(2, "Sending TCP forward login/poll request to check connection status.");
-	//		flags |= (1 << 4);
-	//	}
-
-
-	send_packet('o', &optflags, 1, 12);
+	send_packet('o', buf, sizeof(buf), 12);
 }
 
-static void
+static uint8_t
 send_connection_request()
+/* returns flag byte */
 {
-// TODO connection request
+	uint8_t buf[20], *p = buf;
+	if (this.use_remote_forward) { /* request UDP forward */
+		DEBUG(2, "Sending UDP forward request, length %" L "u, ss_family %hu",
+				p - buf, this.remote_forward_addr.ss_family);
+		struct sockaddr_in *s = (struct sockaddr_in *) &this.remote_forward_addr;
+		if (this.remote_forward_addr.ss_family == AF_INET) {
+			/* remote address is IPv4 */
+			putbyte(&p, 0x0c); /* flags */
+			putshort(&p, s->sin_port); /* port */
+			putdata(&p, (uint8_t *) &s->sin_addr, 4); /* ipv4 addr */
+		} else if (this.remote_forward_addr.ss_family == AF_INET6) {
+			/* remote address is IPv6 */
+			struct sockaddr_in6 *s6 = (struct sockaddr_in6 *) &this.remote_forward_addr;
+			putbyte(&p, 0x0e);
+			putshort(&p, s6->sin6_port);
+			putdata(&p, (uint8_t *) &s6->sin6_addr, 16);
+		} else {
+			/* remote address is server's local IP */
+			putbyte(&p, 0x08);
+			putshort(&p, s->sin_port);
+		}
+	} else { /* request TUN IP */
+		DEBUG(2, "Requesting TUN IP");
+		putbyte(&p, 0x01); /* flags */
+	}
+	send_packet('k', buf, p - buf, 12);
+	return buf[0];
 }
 
 static int
@@ -1388,7 +1364,8 @@ handshake_version(uint8_t *sc)
 
 		len = sizeof(in);
 		if ((ret = handshake_waitdns(in, &len, 0, 'V', i + 1)) != 1 || len < 9) {
-			fprintf(stderr, "Retrying version check...\n");
+			fprintf(stderr, "Retrying version check: ");
+			print_downstream_err();
 			continue;
 		}
 
@@ -1442,13 +1419,9 @@ handshake_login(uint8_t *sc)
 		send_login(clogin, cc);
 
 		len = sizeof(in);
-		ret = handshake_waitdns(in, &len, 0, 'L', i + 1);
-		if (ret == 0 && downstream_decode_err == (DDERR_IS_ANS | DH_ERR(BADLOGIN))) {
-			fprintf(stderr, "Bad password\n");
-			return 1;
-		} else if (ret != 1 || len != 16) {
-			DEBUG(1, "Bad login reply from server: len (%d != 16)", len);
-			fprintf(stderr, "Retrying login...\n");
+		if ((ret = handshake_waitdns(in, &len, 0, 'L', i + 1)) != 1 || len != 16) {
+			fprintf(stderr, "Retrying login: ");
+			print_downstream_err();
 			continue;
 		}
 
@@ -1494,9 +1467,7 @@ handshake_raw_udp()
 		len = sizeof(in);
 		if ((ret = handshake_waitdns(in, &len, 0, 'I', i + 1)) != 1) {
 			continue;
-		}
-
-		if (len == 5 && in[0] == 4) {
+		} else if (len == 5 && in[0] == 4) {
 			/* Received IPv4 address */
 			struct sockaddr_in *raw4_serv = (struct sockaddr_in *) &this.raw_serv;
 			raw4_serv->sin_family = AF_INET;
@@ -1563,39 +1534,6 @@ handshake_raw_udp()
 
 	fprintf(stderr, "failed\n");
 	return 0;
-}
-
-static int
-handle_codectest(uint8_t **ans, size_t *anslen, uint16_t *drlen, uint8_t *ulr, uint8_t *flags)
-/* *ans is DNS-decoded answer data, *anslen is set to amount of data after header */
-{
-	uint8_t header[30], hmac_real[16], hmac_pkt[12], *p = header;
-	uint32_t cmc;
-	if (*anslen < 32) {
-		return 0; /* header is too short (32 bytes base32)! abandon! */
-	}
-	size_t hlen = 20;
-	putlong(&p, 20);
-	if (b32->decode(p, &hlen, *ans, 32) != 20) {
-		DEBUG(1, "b32 wrong decode len!");
-		return 0;
-	}
-	readlong(header, &p, &cmc); /* TODO: check CMC */
-	readdata(&p, hmac_pkt, 12); /* read and clear HMAC */
-	memset((p - 12), 0, 12);
-	*flags = *p++;
-	*ulr = *p++;
-	readshort(header, &p, drlen);
-
-	/* validate HMAC */
-	hmac_md5(hmac_real, this.hmac_key, 16, header, 24);
-	if (memcmp(hmac_real, hmac_pkt, 12) != 0) {
-		DEBUG(1, "RX codectest: bad HMAC pkt=0x%s, actual=0x%s (12)",
-				tohexstr(hmac_pkt, 12, 0), tohexstr(hmac_real, 12, 1));
-		return 0;
-	} else {
-		return 1;
-	}
 }
 
 static int
@@ -1670,29 +1608,25 @@ handshake_codectest(uint8_t *s, size_t slen, int dn, int tries, size_t testlen)
 		}
 
 		inlen = sizeof(in);
-		if ((ret = handshake_waitdns(in, &inlen, 33, 'U', i + 1)) == -2 || ret == -1) {
-			return 0;	/* hard error */
-		} else if (ret != 0) { /* other error, decoding error (0) is expected */
-			if (i < tries - 1)
-				fprintf(stderr, "Retrying %s codec test...\n", stream);
+		if ((ret = handshake_waitdns(in, &inlen, 33, 'U', i + 1)) != 1 || inlen < 4) {
+			if (i < tries - 1) {
+				fprintf(stderr, "Retrying %s codec test: ", stream);
+				print_downstream_err();
+			}
 			continue;
-		} else if (inlen < 32) {
-			fprintf(stderr, "Reply header corrupted, may be truncated.");
-			continue;	/* reply too short (chars dropped) */
 		}
 		
-		uint8_t *datar = in;
-		if (!handle_codectest(&datar, &inlen, &drlen, &ulr, &flags)) {
-			fprintf(stderr, "Got bad header, retrying...\n");
-			continue;
-		}
+		uint8_t *p = in;
+		flags = *p++;
+		ulr = *p++;
+		readshort(in, &p, &drlen);
 
 		if (dn) { /* downstream check: datar is repeated base32 decoded dataq */
-			return codectest_validate(test, testlen, datar, inlen);
+			return codectest_validate(test, testlen, in + 4, inlen - 4);
 		} else { /* upstream check: datar is base32 encoded dataq */
 			uint8_t buf[4096];
 			size_t buflen = sizeof(buf);
-			buflen = b32->decode(buf, &buflen, datar, inlen);
+			buflen = b32->decode(buf, &buflen, in + 4, inlen - 4);
 			return codectest_validate(test, testlen, buf, buflen);
 		}
 	}
@@ -1846,64 +1780,36 @@ handshake_edns0_check()
 	}
 }
 
-static void
-handshake_switch_options(int lazy, int compression, char denc)
+static int
+handshake_switch_options(int lazy, int compression, uint8_t dnenc, uint8_t upenc, uint16_t dnfraglen)
 {
 	uint8_t in[100];
 	size_t len;
-	int read;
+	int ret;
 	char *dname, *comp_status, *lazy_status;
 
 	comp_status = compression ? "enabled" : "disabled";
-
-	dname = "Base32";
-	if (denc == 'S')
-		dname = "Base64";
-	else if (denc == 'U')
-		dname = "Base64u";
-	else if (denc == 'V')
-		dname = "Base128";
-	else if (denc == 'R')
-		dname = "Raw";
-
 	lazy_status = lazy ? "lazy" : "immediate";
-
 	fprintf(stderr, "Switching server options: %s mode, downstream codec %s, compression %s...\n",
 			lazy_status, dname, comp_status);
-	for (int i = 0; this.running && i < 5; i++) {
 
-		send_server_options(lazy, compression, denc);
+	for (int i = 0; this.running && i < 5; i++) {
+		send_server_options(lazy, compression, dnenc, upenc, dnfraglen);
 
 		len = sizeof(in);
-		read = handshake_waitdns(in, &len, 0, 'O', i + 1);
-
-		if (read > 0) {
-			in[read] = 0; /* zero terminate */
-
-			if (strncmp("BADLEN", in, 6) == 0) {
-				fprintf(stderr, "Server got bad message length.\n");
-				goto opt_revert;
-			} else if (strncmp("BADIP", in, 5) == 0) {
-				fprintf(stderr, "Server rejected sender IP address.\n");
-				goto opt_revert;
-			} else if (strncmp("BADCODEC", in, 8) == 0) {
-				fprintf(stderr, "Server rejected the selected options.\n");
-				goto opt_revert;
-			} else if (strcasecmp(dname, in) == 0) {
-				fprintf(stderr, "Switched server options, using downsteam codec %s.\n", in);
-				this.lazymode = lazy;
-				this.compression_down = compression;
-				this.enc_down = denc;
-				return;
-			} else {
-				fprintf(stderr, "Got invalid response. ");
-			}
+		if ((ret = handshake_waitdns(in, &len, 0, 'O', i + 1)) == 1) {
+		/* options changed successfully */
+			this.enc_down = dnenc;
+			this.enc_up = upenc;
+			this.compression_down = compression;
+			this.lazymode = lazy;
+			return 1; /* success */
 		}
 
 		fprintf(stderr, "Retrying options switch...\n");
 	}
 	if (!this.running)
-		return;
+		return 0;
 
 	fprintf(stderr, "No reply from server on options switch.\n");
 
@@ -1913,26 +1819,64 @@ opt_revert:
 
 	fprintf(stderr, "Falling back to previous configuration: downstream codec %hhu, %s mode, compression %s.\n",
 			this.enc_down, lazy_status, comp_status);
-
-
-	// TODO deal with only UDP forwarding (possibly built without TUN support)
-//	ip.s_addr = *(uint32_t *) in;
-//	strncpy(server, inet_ntoa(ip), sizeof(server));
-//	ip.s_addr = *(uint32_t *) (in + 4);
-//	strncpy(client, inet_ntoa(ip), sizeof(client));
-//	mtu = ntohs(*(uint16_t *) (in + 8));
-//	netmask = in[10];
-//
-//	if (tun_setip(client, server, netmask) == 0 && tun_setmtu(mtu) == 0) {
-//		fprintf(stderr, "Server tunnel IP/netmask is %s/%hhu, our IP is %s\n",
-//				server, netmask, client);
-//		return 0;
-//	} else {
-//		errx(4, "Failed to set IP and MTU");
-//	}
-
+	return 0;
 }
 
+static int
+handshake_connection_request()
+/* returns 1 on server accepting connection, 0 on failure */
+{
+	uint8_t in[100], flags, *p;
+	size_t len;
+	int ret;
+
+	fprintf(stderr, "Requesting iodine data tunnel...");
+	for (int i = 0; this.running && i < 5; i++) {
+		flags = send_connection_request();
+
+		len = sizeof(in);
+		p = in;
+		if ((ret = handshake_waitdns(in, &len, 0, 'k', i + 1)) != 1) {
+			print_downstream_err();
+			fprintf(stderr, ".");
+			continue;
+		} else if (len < 1 || flags != *p++) { /* Check reply flags from server */
+			DEBUG(1, "invalid reply len=%" L "u, flags: %02x, expected %02x", len, in[0], flags);
+			return 0;
+		} else if (this.use_remote_forward) {
+			/* 1 byte flags in reply means UDP forward accepted */
+			if (len >= 1)
+				DEBUG(1, "extra length connreq reply: %" L "u", len);
+			return 1;
+		} else if (len != 12) {
+			/* too short reply! */
+			DEBUG(1, "reply too short! expected 11, got %" L "u", len);
+			return 0;
+		}
+
+		/* decode TUN configuration */
+		struct in_addr ip;
+		char client[13], server[13];
+		uint16_t mtu;
+		uint8_t netmask;
+		readdata(&p, (uint8_t *) &ip.s_addr, 4);
+		strncpy(server, inet_ntoa(ip), sizeof(server));
+		readdata(&p, (uint8_t *) &ip.s_addr, 4);
+		strncpy(client, inet_ntoa(ip), sizeof(client));
+		readshort(in, &p, &mtu);
+		netmask = *p++;
+
+		if (tun_setip(client, server, netmask) == 0 && tun_setmtu(mtu) == 0) {
+			fprintf(stderr, "Server tunnel IP/netmask is %s/%hhu, our IP is %s\n",
+					server, netmask, client);
+			return 1;
+		} else {
+			errx(4, "Failed to set IP and MTU");
+		}
+	}
+	fprintf(stderr, "done.\n");
+	return 1;
+}
 
 static int
 handshake_autoprobe_fragsize()
@@ -2020,12 +1964,14 @@ handshake_set_timeout()
 	this.rtt_total_ms = 0;
 
 	for (int i = 0; this.running && i < 5; i++) {
-
 		id = this.autodetect_server_timeout ?
 			update_server_timeout(1) : send_ping(1, -1, 1, 0);
 
 		len = sizeof(in);
-		if ((ret = handshake_waitdns(in, &len, 0, 'P', i + 1)) < 0 && ret > -4) {
+		if ((ret = handshake_waitdns(in, &len, 0, 'P', i + 1)) != 1) {
+			if (ret == -2 || ret == -4 || ret == 0) {
+				got_response(id, 1, 0);
+			}
 			fprintf(stderr, "!");
 			continue;
 		}
@@ -2110,10 +2056,11 @@ client_handshake()
 		}
 	}
 
-	/* Set server-side options (up/down codec, compression, timeout etc. */
-	handshake_switch_options(this.lazymode, this.compression_down, this.enc_down);
-	if (!this.running)
+	/* Set server-side options (up/down codec, compression, fraglen) */
+	if (!handshake_switch_options(this.lazymode, this.compression_down,
+			this.enc_down, this.enc_up, this.maxfragsize_down)) {
 		return -1;
+	}
 
 	/* init windowing protocol */
 	this.outbuf = window_buffer_init(64, (0 == this.windowsize_up ? 1 : this.windowsize_up), this.maxfragsize_up, WINDOW_SENDING);
@@ -2131,6 +2078,10 @@ client_handshake()
 	/* set server window/timeout parameters and calculate RTT */
 	handshake_set_timeout();
 
-	return 0;
+	/* request connection, and then we are done */
+	if (!handshake_connection_request())
+		return 0;
+
+	return 1;
 }
 
