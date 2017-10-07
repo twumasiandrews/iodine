@@ -133,7 +133,6 @@ send_data_or_ping(int userid, struct dns_packet *q, int ping, int immediate)
    ping: 1=force send ping (even if data available), 0=only send if no data.
    immediate: 1=not from qmem (ie. fresh query), 0=query is from qmem */
 {
-	size_t datalen, headerlen;
 	fragment *f = NULL;
 	struct frag_buffer *out, *in;
 	struct tun_user *u = &users[userid];
@@ -142,71 +141,54 @@ send_data_or_ping(int userid, struct dns_packet *q, int ping, int immediate)
 	in = u->incoming;
 	out = u->outgoing;
 
-	uint8_t pkt[out->maxfraglen + DOWNSTREAM_PING_HDR];
+	uint8_t pkt[out->maxfraglen + DOWNSTREAM_PING_HDR], *p = pkt;
 
-	f = window_get_next_sending_fragment(out, NULL);
+	if (!ping) {
+		f = window_get_next_sending_fragment(out, NULL);
+	}
 
 	/* Build downstream data/ping header (see doc/proto_xxxxxxxx.txt) for details */
 	if (!f) {
-		/* No data, send data/ping header (with extra info) */
+		/* No data, send downstream ping header */
 		ping = 1;
-		datalen = 0;
-		pkt[0] = 0; /* Pings don't need seq IDs unless they have data */
-		pkt[1] = u->next_upstream_ack & 0xFF;
-		pkt[2] = (u->next_upstream_ack < 0 ? 0 : 1) << 3;
-		u->next_upstream_ack = -1;
-	} else {
-		datalen = f->len;
-		pkt[0] = f->seqID & 0xFF;
-		pkt[1] = f->ack_other & 0xFF;
-		pkt[2] = ((f->ack_other < 0 ? 0 : 1) << 3) | ((f->compressed & 1) << 2) | (f->start << 1) | f->end;
-		headerlen = DOWNSTREAM_DATA_HDR;
 	}
 
-	/* If this is being responded to immediately (ie. not from qmem)
-	 * This flag is used by client to calculate stats */
-	pkt[2] |= (immediate & 1) << 5;
-	if (tcperror) {
-		pkt[2] |= (1 << 6);
-	}
+	/* Set packet flags */
+	*p++ = ((ping & 1) << 7) | ((immediate & 1) << 3) |
+			((f->compressed & 1) << 2) | (f->start << 1) | f->end;
 
 	if (ping) {
-		/* set ping flag and build extra header */
-		pkt[2] |= 1 << 4;
-		pkt[3] = out->windowsize & 0xFF;
-		pkt[4] = in->windowsize & 0xFF;
-		pkt[5] = out->start_seq_id & 0xFF;
-		pkt[6] = in->start_seq_id & 0xFF;
-		headerlen = DOWNSTREAM_PING_HDR;
-	}
-	if (datalen + headerlen > sizeof(pkt)) {
-		warnx("send_data_or_ping: fragment too large to send! (%" L "u)", datalen);
-		window_tick(out);
-		return NULL;
-	}
-	if (f) {
-		memcpy(pkt + headerlen, f->data, datalen);
+		/* build downstream ping packet */
+		*p++ = out->windowsize & 0xFF;
+		*p++ = in->windowsize & 0xFF;
+		*p++ = out->start_seq_id & 0xFF;
+		*p++ = in->start_seq_id & 0xFF;
+	} else {
+		/* build downstream data packet */
+		*p++ = f->seqID & 0xFF;
+		if (f->len + 1 > sizeof(pkt)) {
+			warnx("send_data_or_ping: fragment too large to send! (%" L "u)", f->lastsent);
+			window_tick(out);
+			return NULL;
+		}
+		memcpy(p, f->data, f->len);
+		p += f->len;
 	}
 
 	/* generate answer for query */
-	ans = write_dns(q, userid, pkt, datalen + headerlen, u->downenc | DH_HMAC32);
+	ans = write_dns(q, userid, pkt, p - pkt, u->downenc | DH_HMAC32);
 	qmem_answered(u->qmem, ans);
 	window_tick(out);
 	return ans;
 }
 
 static void
-user_process_incoming_data(int userid, int ack)
+user_process_incoming_data(int userid)
 {
 	uint8_t pkt[65536];
 	size_t datalen;
 	uint8_t compressed = 0;
 	int can_reassemble = 1;
-
-	if (ack >= 0) {
-		window_ack(users[userid].outgoing, ack);
-		window_tick(users[userid].outgoing);
-	}
 
 	while (can_reassemble == 1) {
 		datalen = sizeof(pkt);
@@ -272,6 +254,8 @@ check_pending_queries(struct timeval *maxwait)
 {
 	struct dns_packet *tosend;
 	for (int userid = 0; userid < created_users; userid++) {
+		if (!user_active(userid))
+			continue;
 		while (qmem_max_wait(users[userid].qmem, &tosend, maxwait)) {
 			send_data_or_ping(userid, tosend, 0, 0);
 		}
@@ -320,29 +304,23 @@ tunnel_bind()
 }
 
 static ssize_t
-tunnel_tcp(int userid)
+tunnel_udp(int userid)
 {
 	ssize_t len;
 	uint8_t buf[64*1024];
 	char *errormsg = NULL;
 
 	if (users[userid].remote_forward_connected != 1) {
-		DEBUG(2, "tunnel_tcp: user %d TCP socket not connected!", userid);
+		DEBUG(2, "tunnel_udp: user %d UDP socket not active!", userid);
 		return 0;
 	}
 
 	len = read(users[userid].remote_udp_fd, buf, sizeof(buf));
 
-	DEBUG(5, "read %ld bytes on TCP", len);
-	if (len == 0) {
-		DEBUG(1, "EOF on TCP forward for user %d; closing connection.", userid);
-		errormsg = "Connection closed by remote host.";
-		user_send_tcp_disconnect(userid, NULL, errormsg);
-		return -1;
-	} else if (len < 0) {
+	DEBUG(5, "IN UDP: %ld bytes to user %d", len, userid);
+	if (len < 0) {
 		errormsg = strerror(errno);
-		DEBUG(1, "Error %d on TCP forward for user %d: %s", errno, userid, errormsg);
-		user_send_tcp_disconnect(userid, NULL, errormsg);
+		DEBUG(1, "Error %d on UDP forward for user %d: %s", errno, userid, errormsg);
 		return -1;
 	}
 
@@ -441,11 +419,11 @@ tunnel_dns(int dns_fd)
 			forward_query(server.bind_fd, q, pkt, pktlen);
 		}
 	}
-	dns_packet_destroy(q);
 	if (ans) {
 		send_dns(dns_fd, ans);
 		dns_packet_destroy(ans);
 	}
+	dns_packet_destroy(q);
 }
 
 int
@@ -492,10 +470,7 @@ server_tunnel()
 		}
 
 		/* add connected user TCP forward FDs to read set */
-		maxfd = MAX(set_user_tcp_fds(&read_fds, 1), maxfd);
-
-		/* add connectING user TCP FDs to write set */
-		maxfd = MAX(set_user_tcp_fds(&write_fds, 2), maxfd);
+		maxfd = MAX(set_user_udp_fds(&read_fds, 1), maxfd);
 
 		i = select(maxfd + 1, &read_fds, &write_fds, NULL, &tv);
 
@@ -523,13 +498,8 @@ server_tunnel()
 			}
 
 			for (userid = 0; userid < created_users; userid++) {
-				if (FD_ISSET(users[userid].remote_udp_fd, &read_fds) && users[userid].remoteforward_addr_len > 0) {
-					DEBUG(4, "tunnel_tcp called for user %d", userid);
-					tunnel_tcp(userid);
-				} else if (users[userid].remote_forward_connected == 2 &&
-					FD_ISSET(users[userid].remote_udp_fd, &write_fds)) {
-					DEBUG(2, "User %d TCP socket now writable (connection established)", userid);
-					users[userid].remote_forward_connected = 1;
+				if (user_active(userid) && FD_ISSET(users[userid].remote_udp_fd, &read_fds)) {
+					tunnel_udp(userid);
 				}
 			}
 
@@ -731,10 +701,10 @@ send_dns(int fd, struct dns_packet *q)
 	}
 
 	DEBUG(3, "TX: client %s ID %5d, dnslen %" L "u, type %hu, name '%10s'",
-			format_addr(&q->m.from, q->m.fromlen), q->id, len, q->q[0].type,
+			format_addr(&q->m.dest, q->m.destlen), q->id, len, q->q[0].type,
 			format_host(q->q[0].name, q->q[0].namelen, 0));
 
-	sendto(fd, buf, len, 0, (struct sockaddr*)&q->m.from, q->m.fromlen);
+	sendto(fd, buf, len, 0, (struct sockaddr *) &q->m.dest, q->m.destlen);
 }
 
 static struct dns_packet *
@@ -935,7 +905,7 @@ user_open_udp(int userid)
 	struct tun_user *u = &users[userid];
 
 	/* Open socket and connect to TCP forward host:port */
-	if ((tcp_fd = socket(u->remoteforward_addr.ss_family, SOCK_DGRAM)) < 0) {
+	if ((tcp_fd = socket(u->remoteforward_addr.ss_family, SOCK_DGRAM, IPPROTO_UDP)) < 0) {
 		DEBUG(1, "Socket error: %s", strerror(errno));
 		return 0;
 	}
@@ -958,9 +928,9 @@ handle_dns_connection_request(struct dns_packet *q, int userid, uint8_t *unpacke
 	if (flags & 0x01) { /* request TUN IP */
 		struct in_addr tunip;
 		tunip.s_addr = u->tun_ip;
-		DEBUG(1, "user %d requested TUN IP, giving %s", inet_ntoa(&tunip));
+		DEBUG(1, "user %d requested TUN IP, giving %s", inet_ntoa(tunip));
 		/* send TUN config details to client */
-		putdata(&o, (uint8_t *) &server.my_ip);
+		putdata(&o, (uint8_t *) &server.my_ip, 4);
 		putdata(&o, (uint8_t *) &u->tun_ip, 4);
 		putshort(&o, server.mtu);
 		putbyte(&o, server.netmask);
@@ -1001,87 +971,44 @@ handle_dns_connection_request(struct dns_packet *q, int userid, uint8_t *unpacke
 	if (good) {
 		return write_dns(q, userid, out, p - out, WD_AUTO);
 	} else {
-		return write_dns(q, userid, 0, NULL, DH_ERR(BADOPTS));
+		return write_dns(q, userid, NULL, 0, DH_ERR(BADOPTS));
 	}
 }
 
 static struct dns_packet *
-handle_dns_set_options(struct dns_packet *q, int userid,
-					   uint8_t *unpacked, size_t read)
+handle_dns_set_options(struct dns_packet *q, int userid, uint8_t *data, size_t len)
 {
-	uint8_t bits = 0;
-	int tmp_lazy, tmp_downenc, tmp_comp;
-
-	// TODO handle UDP forward in options
-
-
-	/* Temporary variables: don't change anything until all options parsed */
-	tmp_lazy = users[userid].lazy;
-	tmp_comp = users[userid].down_compression;
-	tmp_downenc = users[userid].downenc;
-
-	switch (unpacked[0] & 0x7C) {
-	case (1 << 6): /* Base32 */
-		tmp_downenc = 'T';
-		encname = "Base32";
-		bits = 5;
-		break;
-	case (1 << 5): /* Base64 */
-		tmp_downenc = 'S';
-		encname = "Base64";
-		bits = 6;
-		break;
-	case (1 << 4): /* Base64u */
-		tmp_downenc = 'U';
-		encname = "Base64u";
-		bits = 26;
-		break;
-	case (1 << 3): /* Base128 */
-		tmp_downenc = 'V';
-		encname = "Base128";
-		bits = 7;
-		break;
-	case (1 << 2): /* Raw */
-		tmp_downenc = 'R';
-		encname = "Raw";
-		bits = 8;
-		break;
-	default: /* Invalid (More than 1 encoding bit set) */
+	uint16_t dnfragsize;
+	uint8_t flags, *p = data;
+	struct tun_user *u = &users[userid];
+	if (len != 3) {
 		return write_dns(q, userid, NULL, 0, DH_ERR(BADOPTS));
 	}
 
-	tmp_comp = (unpacked[0] & 2) >> 1; /* compression flag */
-	tmp_lazy = (unpacked[0] & 1); /* lazy mode flag */
+	flags = *p++;
+	readshort(data, &p, &dnfragsize);
 
-	/* Automatically switch to raw encoding if PRIVATE or NULL request */
-	if ((q->q[0].type == T_NULL || q->q[0].type == T_PRIVATE) && !bits) {
-		users[userid].downenc = 'R';
-		bits = 8;
-		DEBUG(2, "Assuming raw data encoding with NULL/PRIVATE requests for user %d.", userid);
-	}
-	if (bits) {
-		int f = users[userid].fragsize;
-		window_buffer_resize(users[userid].outgoing, users[userid].outgoing->length,
-				(bits * f) / 8 - DOWNSTREAM_PING_HDR);
-//		users[userid].downenc_bits = bits;
-	}
+	u->downenc = flags & 7;
+	u->upenc = (flags >> 3) & 7;
+	u->down_compression = (flags >> 6) & 1;
+	u->lazy = (flags >> 7) & 1;
+	u->fragsize = dnfragsize;
 
-	DEBUG(1, "Options for user %d: down compression %d, data bits %d/maxlen %u (enc '%c'), lazy %d.",
-		  userid, tmp_comp, bits, users[userid].outgoing->maxfraglen, tmp_downenc, tmp_lazy);
+	window_buffer_resize(u->outgoing, u->outgoing->length,
+			get_encoder(u->downenc)->get_raw_length(u->fragsize));
 
-	/* Store any changes */
-	users[userid].down_compression = tmp_comp;
-	users[userid].downenc = tmp_downenc;
-	users[userid].lazy = tmp_lazy;
+	DEBUG(1, "OPTS user %d: lazy %hhd, comp_down %hhd, enc_up %hhd, enc_dn %hhd, fragsize %hu",
+		  userid, u->lazy, u->down_compression, get_encoder(u->upenc)->name,
+		  get_encoder(u->downenc)->name, dnfragsize);
 
-	return write_dns(q, userid, encname, strlen(encname), WD_AUTO);
+	return write_dns(q, userid, data, len, WD_AUTO);
 }
 
 static struct dns_packet *
 handle_dns_ping(struct dns_packet *q, int userid, uint8_t *unpacked, size_t read)
 {
-	int dn_seq, up_seq, dn_winsize, up_winsize, dn_ack;
-	int respond, set_qtimeout, set_wtimeout, tcp_disconnect;
+	int dn_seq, up_seq, dn_winsize, up_winsize;
+	int respond, set_qtimeout, set_wtimeout;
 	unsigned qtimeout_ms, wtimeout_ms;
 	struct tun_user *u = &users[userid];
 
@@ -1098,7 +1025,6 @@ handle_dns_ping(struct dns_packet *q, int userid, uint8_t *unpacked, size_t read
 	}
 
 	/* Unpack flags/options from ping header */
-	dn_ack = ((unpacked[9] >> 2) & 1) ? unpacked[0] : -1;
 	up_winsize = unpacked[1];
 	dn_winsize = unpacked[2];
 	up_seq = unpacked[3];
@@ -1110,24 +1036,12 @@ handle_dns_ping(struct dns_packet *q, int userid, uint8_t *unpacked, size_t read
 	respond = unpacked[9] & 1;
 	set_qtimeout = (unpacked[9] >> 3) & 1;
 	set_wtimeout = (unpacked[9] >> 4) & 1;
-	tcp_disconnect = (unpacked[9] >> 5) & 1;
 
-	DEBUG(3, "PING pkt user %d, down %d/%d, up %d/%d, ACK %d, %sqtime %u ms, "
-		  "%swtime %u ms, respond %d, tcp_close %d (flags %02X)",
-				userid, dn_seq, dn_winsize, up_seq, up_winsize, dn_ack,
+	DEBUG(3, "PING pkt user %d, down %d/%d, up %d/%d, %sqtime %u ms, "
+		  "%swtime %u ms, respond %d (flags %02X)",
+				userid, dn_seq, dn_winsize, up_seq, up_winsize,
 				set_qtimeout ? "SET " : "", qtimeout_ms, set_wtimeout ? "SET " : "",
-				wtimeout_ms, respond, tcp_disconnect, unpacked[9]);
-
-	if (tcp_disconnect) {
-		/* close user's TCP forward connection and mark user as inactive */
-		if (u->remoteforward_addr_len == 0) {
-			DEBUG(1, "User %d attempted TCP disconnect but didn't request TCP forwarding!", userid);
-		} else {
-			DEBUG(1, "User %d closed remote TCP forward", userid);
-			close_socket(u->remote_tcp_fd);
-			u->active = 0;
-		}
-	}
+				wtimeout_ms, respond, unpacked[9]);
 
 	if (set_qtimeout) {
 		/* update user's query timeout if timeout flag set */
@@ -1158,7 +1072,7 @@ handle_dns_ping(struct dns_packet *q, int userid, uint8_t *unpacked, size_t read
 	}
 
 	/* if respond flag not set, query waits in qmem and is used later */
-	user_process_incoming_data(userid, dn_ack);
+	user_process_incoming_data(userid);
 	return NULL;
 }
 
@@ -1172,7 +1086,7 @@ handle_dns_data(struct dns_packet *q, uint8_t *unpacked, size_t len, int userid)
 	/* Need 2 byte header + >=1 byte data */
 	if (len != UPSTREAM_DATA_HDR + 1) {
 		DEBUG(3, "BADLEN: expected %u, got %u", len, UPSTREAM_DATA_HDR + 1);
-		return write_dns(q, userid, "BADLEN", 6, DH_ERR(BADLEN));
+		return write_dns(q, userid, NULL, 0, DH_ERR(BADLEN));
 	}
 	/* Check if cached */
 	if ((ans = qmem_is_cached(u->qmem, q))) {
@@ -1193,16 +1107,9 @@ handle_dns_data(struct dns_packet *q, uint8_t *unpacked, size_t len, int userid)
 	DEBUG(3, "frag seq %3u, datalen %5lu, ACK %3d, compression %1d, s%1d e%1d",
 				f.seqID, f.len, f.ack_other, f.compressed, f.start, f.end);
 
-	/* if already waiting for an ACK to be sent back upstream (on incoming buffer) */
-	if (u->next_upstream_ack >= 0) {
-		/* Shouldn't normally happen; will always be reset after sending a packet. */
-		DEBUG(1, "[WARNING] next_upstream_ack == %d for user %d.",u->next_upstream_ack, userid);
-	}
-
 	window_process_incoming_fragment(u->incoming, &f);
-	u->next_upstream_ack = f.seqID;
 
-	user_process_incoming_data(userid, f.ack_other);
+	user_process_incoming_data(userid);
 
 	/* Nothing to do. ACK for this fragment is sent later in qmem_max_wait,
 	 * using an old query. This is left in qmem until needed/times out */
@@ -1388,6 +1295,8 @@ handle_null_request(struct dns_packet *q, uint8_t *encdata, size_t encdatalen)
 		return handle_dns_data(q, unpacked, raw_len, userid);
 	case 'I':
 		return handle_dns_ip_request(q, userid);
+	case 'K':
+		return handle_dns_connection_request(q, userid, unpacked, raw_len);
 	case 'U':
 		return handle_dns_codectest(q, userid, unpacked, encdata, encdatalen);
 	case 'O':
