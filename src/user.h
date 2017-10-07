@@ -70,6 +70,6 @@ int init_users(in_addr_t, int);
 const char* users_get_first_ip();
 int find_user_by_ip(uint32_t);
 int find_available_user();
-int set_user_tcp_fds(fd_set *fds, int);
+int set_user_udp_fds(fd_set *fds, int);
 
 #endif

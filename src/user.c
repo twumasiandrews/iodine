@@ -37,6 +37,7 @@
 
 #include "common.h"
 #include "encoding.h"
+#include "cache.h"
 #include "server.h"
 #include "user.h"
 #include "window.h"
@@ -164,7 +165,7 @@ all_users_waiting_to_send()
 {
 	int numactive = 0;
 	for (int i = 0; i < usercount; i++) {
-		if (user_active(i)) {
+		if (user_active(i) && users[i].outgoing) {
 			if (users[i].outgoing->length - users[i].outgoing->numitems > 8)
 				return 0;
 			numactive ++;
@@ -231,8 +232,8 @@ check_user_ip(int userid, struct sockaddr_storage from, socklen_t fromlen)
 }
 
 int
-set_user_tcp_fds(fd_set *fds, int conn_status)
-/* Add TCP forward FDs to fd_set for users with given connection status; returns largest FD added */
+set_user_udp_fds(fd_set *fds, int conn_status)
+/* Add UDP forward FDs to fd_set for users with given connection status; returns largest FD added */
 {
 	int max_fd = 0;
 	for (int userid = 0; userid < created_users; userid ++) {
