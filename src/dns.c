@@ -682,10 +682,8 @@ dns_decode_data_answer(struct dns_packet *q, uint8_t *out, size_t *outlen)
 		/* rest of RR is DNS-encoded hostname */
 		len = readname(a->rdata, a->rdlength, &p, out, *outlen, 1, 0);
 	} else if (type == T_MX || type == T_SRV) {
-		/* We support 250 records, 250*(255+header) ~= 64kB.
-		   Only exact 10-multiples are accepted, and gaps in
-		   numbering are not jumped over (->truncated).
-		   Hopefully DNS servers won't mess around too much. */
+		/* Only exact 10-multiples are accepted, however answers may not be in
+		 * order since DNS servers can mess around a bit */
 		uint8_t *rdatastart;
 		uint16_t pref, lastpref = 0;
 		size_t offset = 0;

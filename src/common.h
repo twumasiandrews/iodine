@@ -155,14 +155,14 @@ extern const unsigned char raw_header[RAW_HDR_LEN];
 #define UPSTREAM_DATA_HDR	2
 #define UPSTREAM_PING		9
 
-/* handy debug printing macro */
-#ifdef DEBUG_BUILD
 #define TIMEPRINT(...) \
 		struct timeval currenttime;\
 		gettimeofday(&currenttime, NULL);\
 		fprintf(stderr, "%03ld.%03ld ", (long) currenttime.tv_sec, (long) currenttime.tv_usec / 1000);\
 		fprintf(stderr, __VA_ARGS__);
 
+/* handy debug printing macro */
+#ifdef DEBUG_BUILD
 #define DEBUG(level, ...) \
 		if (debug >= level) {\
 			TIMEPRINT("[D%d %s:%d] ", level, __FILE__, __LINE__); \
@@ -170,11 +170,8 @@ extern const unsigned char raw_header[RAW_HDR_LEN];
 			fprintf(stderr, "\n");\
 		}
 #else
-#define TIMEPRINT(...) \
-		fprintf(stderr, __VA_ARGS__);
-
 #define DEBUG(level, ...) \
-		if (INSTANCE.debug >= level) {\
+		if (debug >= level && level >= 2) {\
 			fprintf(stderr, "[D%d] ", level); \
 			fprintf(stderr, __VA_ARGS__);\
 			fprintf(stderr, "\n");\
