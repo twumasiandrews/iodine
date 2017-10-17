@@ -646,14 +646,14 @@ static int
 handshake_waitdns(uint8_t *buf, size_t *buflen, size_t signedlen, char cmd, int timeout)
 /* Wait for DNS reply fitting to our latest query and returns it.
    *buflen is set to length of reply data = #bytes used in buf
+   Version commands 'v' are not downstream-decoded
    signedlen = length of b32 data that is signed by HMAC (0 if full reply signed)
    Returns 1 on success
-   Returns 0 on valid error code from server
+   Returns 0 on signed error code from server OR invalid downstream decoding
    Returns -1 on syscall errors.
    Returns -2 on (at least) DNS error that fits to our latest query,
    error message already printed.
    Returns -3 on timeout (given in seconds).
-   Returns -4 on downstream decoding error
 
    Timeout is restarted when "wrong" (previous/delayed) replies are received,
    so effective timeout may be longer than specified.
@@ -681,7 +681,7 @@ handshake_waitdns(uint8_t *buf, size_t *buflen, size_t signedlen, char cmd, int 
 			warn("select");
 			return -1;	/* select error */
 		} else if (r == 0) {
-			DEBUG(2, "timeout in handshake_waitdns, cmd '%c'", cmd);
+			DEBUG(1, "timeout in handshake_waitdns, cmd '%c'", cmd);
 			return -3;	/* select timeout */
 		}
 
@@ -733,18 +733,24 @@ handshake_waitdns(uint8_t *buf, size_t *buflen, size_t signedlen, char cmd, int 
 				return -2;
 		} /* if still here: reply matches our latest query */
 
+		/* version commands have old format, so treat these differently */
+		if (cmd == 'V') {
+			memcpy(buf, ansdata, MIN(*buflen, ansdatalen));
+			*buflen = MIN(*buflen, ansdatalen);
+			return 1;
+		}
+
 		if (signedlen && ansdatalen >= signedlen) {
 			/* only a the base32-encoded header of (signedlen) bytes (encoded length)
 			 * is signed by the HMAC, rest of data is not to be decoded. */
 			size_t hdrlen = *buflen;
+
 			r = downstream_decode(buf, &hdrlen, ansdata, signedlen, this.hmac_key);
 			if (r && hdrlen + ansdatalen - signedlen <= *buflen) {
 				memcpy(buf + hdrlen, ansdata + signedlen, ansdatalen - signedlen);
 				*buflen = hdrlen + ansdatalen - signedlen;
 				return 1;
 			} else {
-				if (debug > 4)
-					print_downstream_err();
 				return 0;
 			}
 		} else { /* normal downstream decode */
@@ -1269,18 +1275,21 @@ send_codectest(uint8_t *dataq, uint8_t dqlen, uint16_t drlen, int dnchk)
 	uint8_t buf[34 + dqlen], hmac[16], header[4 + 2 + 20], *p, *hp;
 	p = header;
 	putlong(&p, 22); /* HMAC-only length field */
-	*p++ = buf[0] = 'u';
-	*p++ = buf[1] = this.userid_char;
+	putbyte(&p, (buf[0] = 'u'));
+	putbyte(&p, (buf[1] = this.userid_char));
 	putlong(&p, CMC(this.cmc_up));
 	memset((hp = p), 0, 12); /* clear HMAC field */
+	p += 12;
 	putbyte(&p, (dnchk & 1)); /* 1 byte flags */
 	putbyte(&p, dqlen);
 	putshort(&p, drlen);
 	hmac_md5(hmac, this.hmac_key, 16, header, sizeof(header));
-	memcpy(header + 8, hmac, 12);
+	memcpy(hp, hmac, 12);
+
+	DEBUG(5, "codectest CMC %08x HMAC %s (12) hmacbuf %s", this.cmc_up, tohexstr(hmac, 12, 0), tohexstr(header, 26, 1));
 
 	size_t buflen = 32;
-	if (b32->encode(buf + 2, &buflen, header + 4, 20) != 32)
+	if (b32->encode(buf + 2, &buflen, header + 6, 20) != 32)
 		DEBUG(1, "upenctest got wrong encoded headerlen!");
 	/* Append codec test data without changing it */
 	memcpy(buf + 34, dataq, dqlen);
@@ -1353,7 +1362,7 @@ static int
 handshake_version(uint8_t *sc)
 /* takes server challenge (16 bytes) as argument */
 {
-	uint8_t hex[] = "0123456789abcdef", in[4096];
+	uint8_t hex[] = "0123456789abcdef", in[100], raw[100], *p;
 	uint32_t payload;
 	size_t len;
 	int ret;
@@ -1364,22 +1373,30 @@ handshake_version(uint8_t *sc)
 
 		len = sizeof(in);
 		if ((ret = handshake_waitdns(in, &len, 0, 'V', i + 1)) != 1 || len < 9) {
-			fprintf(stderr, "Retrying version check: ");
-			print_downstream_err();
+			fprintf(stderr, "Retrying version check...\n");
+			if (ret == 0) print_downstream_err();
 			continue;
 		}
 
-		payload = ntohl(*(uint32_t *) (in + 4));
-		if (memcmp("VACK", in, 4) == 0) {
+		/* decode version reply: assume base32 using old downstream encoding */
+		if (toupper(in[0]) == 'T' || toupper(in[0]) == 'H') {
+			len = unpack_data(raw, sizeof(raw), in + 1, len - 1, C_BASE32);
+		} else {
+			memcpy(raw, in, len);
+		}
+
+		p = raw + 4;
+		readlong(in, &p, &payload);
+		if (memcmp("VACK", raw, 4) == 0) {
 			if (len != 28) {
-				fprintf(stderr, "Bad version check reply from server, trying again...");
+				fprintf(stderr, "Bad version check reply from server, trying again...\n");
 				continue;
 			}
 			/* Payload is new userid, and there will also be 16 bytes
 			 * server challenge. */
-			memcpy(sc, in + 8, 16);
+			readdata(&p, sc, 16);
 			/* Set CMC to starting value given by server. */
-			this.cmc_down = ntohl(*(uint32_t *) (in + 24));
+			readlong(in, &p, &this.cmc_down);
 			this.userid = payload;
 			this.userid_char = hex[this.userid & 15];
 
@@ -1388,15 +1405,18 @@ handshake_version(uint8_t *sc)
 			fprintf(stderr, "Version ok, both using protocol v 0x%08x. You are user #%d\n",
 				PROTOCOL_VERSION, this.userid);
 			return 1;
-		} else if (memcmp("VNAK", in, 4) == 0) {
+		} else if (memcmp("VNAK", raw, 4) == 0) {
 			/* Payload is server version */
 			warnx("You use protocol v 0x%08x, server uses v 0x%08x. Giving up",
 					PROTOCOL_VERSION, payload);
 			return 0;
-		} else if (memcmp("VFUL", in, 4) == 0) {
+		} else if (memcmp("VFUL", raw, 4) == 0) {
 			/* Payload is max number of users on server */
 			warnx("Server full, all %d slots are taken. Try again later", payload);
 			return 0;
+		} else {
+			raw[4] = 0;
+			DEBUG(1, "bad version reply: '%s'", raw);
 		}
 	}
 	warnx("couldn't connect to server (maybe other -T options will work)");
@@ -1420,8 +1440,8 @@ handshake_login(uint8_t *sc)
 
 		len = sizeof(in);
 		if ((ret = handshake_waitdns(in, &len, 0, 'L', i + 1)) != 1 || len != 16) {
-			fprintf(stderr, "Retrying login: ");
-			print_downstream_err();
+			fprintf(stderr, "Retrying login...\n");
+			if (ret == 0) print_downstream_err();
 			continue;
 		}
 
@@ -1466,6 +1486,7 @@ handshake_raw_udp()
 		fflush(stderr);
 		len = sizeof(in);
 		if ((ret = handshake_waitdns(in, &len, 0, 'I', i + 1)) != 1) {
+			if (ret == 0) print_downstream_err();
 			continue;
 		} else if (len == 5 && in[0] == 4) {
 			/* Received IPv4 address */
@@ -1546,7 +1567,8 @@ codectest_validate(uint8_t *test, size_t testlen, uint8_t *datar, size_t datarle
 {
 	if (datarlen != testlen) {
 		/* length mismatch: definitely unreliable */
-		fprintf(stderr, "Test data length mismatch, retrying...\n");
+		fprintf(stderr, "Test data length mismatch (wanted %" L "u, got %" L "u), retrying...\n",
+				testlen, datarlen);
 		return -2;
 	}
 

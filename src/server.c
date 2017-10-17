@@ -107,7 +107,7 @@ forward_query(int bind_fd, struct dns_packet *q, uint8_t *pkt, size_t pktlen)
 static struct dns_packet *
 send_version_response(version_ack_t ack, uint32_t payload, int userid, struct dns_packet *q)
 {
-	uint8_t out[28], *p = out, flags = C_BASE32;
+	uint8_t out[28], *p = out;
 	size_t len = sizeof(out);
 	if (ack == VERSION_ACK) {
 		putdata(&p, (uint8_t *) "VACK", 4);
@@ -121,10 +121,9 @@ send_version_response(version_ack_t ack, uint32_t payload, int userid, struct dn
 		putdata(&p, (uint8_t *) "VNAK", 4);
 		putlong(&p, payload);
 		putbyte(&p, 0);
-		flags = WD_OLD;
 	}
 
-	return write_dns(q, -1, out, (p - out), flags);
+	return write_dns(q, -1, out, (p - out), WD_OLD);
 }
 
 static struct dns_packet *
@@ -710,7 +709,7 @@ send_dns(int fd, struct dns_packet *q)
 static struct dns_packet *
 write_dns(struct dns_packet *q, int userid, uint8_t *data, size_t datalen, uint8_t flags)
 /* takes query q and returns valid DNS answer after sending (NULL on error)
- * answer packet must be destroyed */
+ * answer packet must be freed after use */
 {
 	uint8_t buf[64*1024], tmpbuf[64*1024];
 	size_t len = 0;
@@ -801,9 +800,6 @@ handle_dns_version(struct dns_packet *q, uint8_t *encdata, size_t encdatalen)
 		format_addr(&q->m.from, q->m.fromlen));
 		return send_version_response(VERSION_FULL, created_users, 0, q);
 	}
-
-	/* Reset user options to safe defaults */
-	user_reset(userid);
 
 	struct tun_user *u = &users[userid];
 	/* Store remote IP number */
@@ -1164,16 +1160,6 @@ handle_dns_login(struct dns_packet *q, uint8_t *unpacked,
 	/* calculate server-to-client authentication data */
 	login_calculate(out, server.passwordmd5, cc);
 
-//	/* Send ip/mtu/netmask info */
-//	*(uint32_t *) out = server.my_ip;
-//	*(uint32_t *) (out + 4) = u->tun_ip;
-//	*(uint16_t *) (out + 8) = htons(server.mtu);
-//	out[10] = server.netmask;
-//	memcpy(out + 11, logindata, 16);
-//
-//	struct in_addr tunip;
-//	tunip.s_addr = u->tun_ip;
-//	char *s = inet_ntoa(tunip);
 	DEBUG(1, "User %d connected from %s, srv auth=0x%s",
 			userid, fromaddr, tohexstr(logindata, 16, 0));
 	syslog(LOG_NOTICE, "accepted login from user #%d", userid);
@@ -1242,7 +1228,7 @@ handle_null_request(struct dns_packet *q, uint8_t *encdata, size_t encdatalen)
 		pktlen = encdatalen - 1;
 		minlen = 4 + 4;
 	} else if (cmd == 'U') { /* upstream codec check: nonstandard header */
-		pktlen = 20;
+		pktlen = 32;
 		minlen = 20;
 	} else {
 		pktlen = encdatalen - headerlen; /* pktlen is length of packet to decode */
@@ -1280,13 +1266,14 @@ handle_null_request(struct dns_packet *q, uint8_t *encdata, size_t encdatalen)
 	p = hmacbuf;
 	memcpy(hmac_pkt, unpacked + 4, hmaclen); /* backup HMAC from packet */
 	putlong(&p, raw_len + headerlen); /* 4 bytes length */
+	// XXX hmac breaks if cmd/userid case switched!
 	memcpy(hmacbuf + 4, encdata, headerlen); /* 1-2 bytes command and userid char */
 	memcpy(hmacbuf + 4 + headerlen, unpacked, raw_len);	/* copy signed data to tmp buffer */
 	memset(hmacbuf + headerlen + 8, 0, hmaclen); /* clear HMAC field */
 	hmac_md5(hmac, users[userid].hmac_key, 16, hmacbuf, sizeof(hmacbuf));
 	if (memcmp(hmac, hmac_pkt, hmaclen) != 0) { /* verify signed data */
 		DEBUG(2, "HMAC mismatch! pkt: 0x%s, actual: 0x%s (%" L "u)",
-			tohexstr(hmac_pkt, 16, 0),	tohexstr(hmac, 16, 1), hmaclen);
+			tohexstr(hmac_pkt, hmaclen, 0),	tohexstr(hmac, hmaclen, 1), hmaclen);
 		return write_dns(q, userid, NULL, 0, DH_ERR(BADAUTH));
 	}
 
