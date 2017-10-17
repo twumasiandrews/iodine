@@ -67,19 +67,23 @@ Client sends (length 1+8):
 	Rest encoded with base32:
 	4 bytes big endian protocol version
 	4 bytes random CMC
-Server replies (length 28, or 9 if bad version/full):
+Server replies RAW (length 28, or 9 if bad version/full):
+	1 char 's'
 	4 chars:
 		VACK (version ok), followed by login challenge
 		VNAK (version differs), followed by server protocol version (see note)
 		VFUL (server has no free slots), followed by max users
 	4 byte value: means new userid/server protocol version/max users
+	4 bytes random CMC
 	16 byte server login challenge
-	4 byte random CMC
-Note: VNAK is sent using backwards compatible downstream encoding
-Note: The CMC values are used as a "seed", so following the version command
-all queries must be sent with CMC of ((previous CMC + 1) % MAX_UINT32).
-The server response also contains random "downstream" CMC which has the same
-requirements, although only applies to downstream traffic.
+Notes:
+- Version replies from server use limited backwards compatible downstream
+  header/encoding, and the client will accept at least base32 or raw encoded
+  version replies (such as from older servers). See protocol 501 for details. 
+- The CMC values are used as a "seed", so following the version command
+  all queries must be sent with CMC of ((previous CMC + 1) % MAX_UINT32).
+  The server response also contains random "downstream" CMC which has the same
+  requirements, although only applies to downstream traffic.
 
 Login:
 Client sends (length 2+36):
@@ -306,7 +310,7 @@ Standard server replies are as follows (including data):
 	 |HECCC|   CCC  = Codec type (0-7)
 	 +-----+   E    = 0: no error, 1: Codec field = error code
 	Rest encoded with specified codec:
-	4 bytes CMC (network byte order) (random for pre-login responses)
+	4 bytes CMC (network byte order)
 	4 or 12 bytes HMAC (note: HMAC field is 32-bits random for all pre-login responses)
 	<command-specific data follows>
 
