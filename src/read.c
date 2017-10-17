@@ -44,17 +44,20 @@ readname_loop(uint8_t *packet, size_t packetlen, uint8_t **src, uint8_t *dst,
 	len = 0;
 	s = *src;
 	d = dst;
-	while(*s && len < length - 1) {
+	/* at beginning of loop *s is next label */
+	while (len < length - 1) {
 		labellen = *s++;
 		if (raw) {
 			*d++ = labellen;
 			len++;
 		}
 
-		/* is this a compressed label? */
-		if((labellen & 0xc0) == 0xc0) {
+		if (labellen == 0) { /* root label (end of hostname) */
+			goto end;
+		} else if ((labellen & 0xc0) == 0xc0) { /* compressed label */
 			if (raw) { /* do not follow link, instead copy to dst */
-				*d++ = *s;
+				*d++ = *s++;
+				len++;
 				goto end;
 			}
 			offset = (((labellen & 0x3f) << 8) | (*s++ & 0xff));
@@ -70,12 +73,15 @@ readname_loop(uint8_t *packet, size_t packetlen, uint8_t **src, uint8_t *dst,
 			dummy = packet + offset;
 			len += readname_loop(packet, packetlen, &dummy, d, length - len, loop - 1, bin, 0);
 			goto end;
-		} else if ((labellen & 0xc0) != 0) {
-			/* invalid hostname, abort */
+		} else if ((labellen & 0xc0) != 0) { /* unsupported label */
 			break;
 		}
 
-		while (labellen && len < length - 1 && packetlen - (s - packet) > 1) {
+		/* copy label data */
+		while (labellen) {
+			if (len >= length || (s - packet) >= packetlen) {
+				goto end; /* all input/output space used up */
+			}
 			if (!bin && *s == DOT_CHAR) {
 				/* dot in middle of hostname: data is technically invalid but
 				 * as a solution just replace with some other character */
@@ -88,10 +94,7 @@ readname_loop(uint8_t *packet, size_t packetlen, uint8_t **src, uint8_t *dst,
 			labellen--;
 		}
 
-		if (len >= length - 1 || packetlen - (s - packet) <= 1) {
-			break; /* We used up all space */
-		}
-
+		/* add human-friendly dots for "abc.def.example.com" style hostname */
 		if (!(bin || raw) && *s != 0) {
 			*d++ = DOT_CHAR;
 			len++;
@@ -99,8 +102,10 @@ readname_loop(uint8_t *packet, size_t packetlen, uint8_t **src, uint8_t *dst,
 	}
 
 end:
-	*d++ = *s++;
-	len++;
+//	if (raw) { /* XXX why? copy root label and/or last byte */
+//		*d++ = *s++;
+//		len++;
+//	}
 	(*src) = s;
 	return len;
 }
