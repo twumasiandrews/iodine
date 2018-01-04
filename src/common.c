@@ -15,9 +15,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#ifdef HAVE_CONFIG_H
-#include "config.h"
-#endif
+
 
 #include <time.h>
 #include <sys/types.h>
@@ -412,7 +410,7 @@ socket_set_blocking(int fd, int blocking)
 {
 	/* Set non-blocking socket mode */
 #ifdef WINDOWS32
-	if (ioctlsocket(fd, FIONBIO, &blocking) != 0) {
+	if (ioctlsocket(fd, FIONBIO, (u_long *) &blocking) != 0) {
 		return WSAGetLastError();
 	}
 #else
@@ -466,7 +464,7 @@ check_tcp_error(int fd, char **error)
 	int errornum = 0;
 	socklen_t len = sizeof(int);
 
-	if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &errornum, &len) != 0) {
+	if (getsockopt(fd, SOL_SOCKET, SO_ERROR,(char *) &errornum, &len) != 0) {
 		if (error)
 			*error = "getsockopt failed.";
 		return -1;
@@ -556,4 +554,3 @@ fd_set_close_on_exec(int fd)
 		err(4, "Failed to set fd flags");
 }
 #endif
-

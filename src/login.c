@@ -14,10 +14,11 @@
  * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
-
-#ifdef HAVE_CONFIG_H
-#include "config.h"
-#endif
+ #ifndef WINDOWS32
+ #ifdef HAVE_CONFIG_H
+ #include "config.h"
+ #endif
+ #endif
 
 #include <string.h>
 #include <sys/types.h>
@@ -60,4 +61,3 @@ login_calculate(char *buf, int buflen, const char *pass, int seed)
 	md5_finish(&ctx, (unsigned char *) buf);
 
 }
-

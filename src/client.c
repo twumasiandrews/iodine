@@ -16,9 +16,11 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#ifdef HAVE_CONFIG_H
-#include "config.h"
-#endif
+ #ifndef WINDOWS32
+ #ifdef HAVE_CONFIG_H
+ #include "config.h"
+ #endif
+ #endif
 
 #include <ctype.h>
 #include <stdio.h>
@@ -379,7 +381,7 @@ send_query(uint8_t *hostname)
 
 	DEBUG(4, "  Sendquery: id %5d name[0] '%c'", q.id, hostname[0]);
 
-	sendto(this.dns_fd, packet, len, 0, (struct sockaddr*) &this.nameserv_addrs[this.current_nameserver].addr,
+	sendto(this.dns_fd,(const char *) packet, len, 0, (struct sockaddr*) &this.nameserv_addrs[this.current_nameserver].addr,
 			this.nameserv_addrs[this.current_nameserver].len);
 
 	client_rotate_nameserver();
@@ -734,7 +736,7 @@ read_dns_withq(uint8_t *buf, size_t buflen, struct query *q)
 	int r;
 
 	addrlen = sizeof(from);
-	if ((r = recvfrom(this.dns_fd, data, sizeof(data), 0,
+	if ((r = recvfrom(this.dns_fd,(char *) data, sizeof(data), 0,
 			  (struct sockaddr*)&from, &addrlen)) < 0) {
 		warn("recvfrom");
 		return -1;
@@ -824,7 +826,7 @@ read_dns_withq(uint8_t *buf, size_t buflen, struct query *q)
 
 		r -= RAW_HDR_LEN;
 		datalen = sizeof(buf);
-		if (uncompress(buf, &datalen, data + RAW_HDR_LEN, r) == Z_OK) {
+		if (uncompress(buf, (uLongf *) &datalen, data + RAW_HDR_LEN, r) == Z_OK) {
 			write_tun(this.tun_fd, buf, datalen);
 		}
 
@@ -978,7 +980,7 @@ tunnel_stdin()
 
 	if (this.conn != CONN_DNS_NULL || this.compression_up) {
 		datalen = sizeof(out);
-		compress2(out, &datalen, in, readlen, 9);
+		compress2(out, (uLongf *) &datalen, in, readlen, 9);
 		data = out;
 	} else {
 		datalen = readlen;
@@ -1005,7 +1007,7 @@ tunnel_stdin()
 static int
 tunnel_tun()
 {
-	size_t datalen;
+	uLongf  datalen;
 	uint8_t out[64*1024];
 	uint8_t in[64*1024];
 	uint8_t *data;
@@ -1199,7 +1201,7 @@ tunnel_dns()
 		if (datalen > 0) {
 			if (compressed) {
 				buflen = sizeof(buf);
-				if ((ping = uncompress(buf, &buflen, cbuf, datalen)) != Z_OK) {
+				if ((ping = uncompress(buf, (uLongf *) &buflen, cbuf, datalen)) != Z_OK) {
 					DEBUG(1, "Uncompress failed (%d) for data len %" L "u: reassembled data corrupted or incomplete!", ping, datalen);
 					datalen = 0;
 				} else {
@@ -2741,4 +2743,3 @@ client_handshake()
 
 	return 0;
 }
-

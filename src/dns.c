@@ -14,9 +14,10 @@
  * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
-
+#ifndef WINDOWS32
 #ifdef HAVE_CONFIG_H
 #include "config.h"
+#endif
 #endif
 
 #include <time.h>
@@ -629,4 +630,3 @@ dns_decode(char *buf, size_t buflen, struct query *q, qr_t qr, char *packet, siz
 
 	return rv;
 }
-

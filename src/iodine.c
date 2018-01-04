@@ -14,10 +14,11 @@
  * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
-
-#ifdef HAVE_CONFIG_H
-#include "config.h"
-#endif
+ #ifndef WINDOWS32
+ #ifdef HAVE_CONFIG_H
+ #include "config.h"
+ #endif
+ #endif
 
 #include <stdio.h>
 #include <stdint.h>
@@ -812,4 +813,3 @@ cleanup:
 
 	return retval;
 }
-
